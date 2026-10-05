@@ -20,7 +20,7 @@ from textual.widgets import (Button, DataTable, Footer, Input, Label, ListItem, 
 
 from ..arr import ArrClient, ArrError, ArrIndex, auto_map
 from ..config import Config, Root, is_network_path
-from ..encode import (CODEC_LABEL, EncodeSettings, already_target, delete_preset, est_bytes, load_presets,
+from ..encode import (CODEC_LABEL, EncodeSettings, already_target, delete_preset, est_bytes, load_presets, skip_reason,
                       preset_doc, resolve_encoder, save_preset)
 from ..engine import ACTIVE, LIVE, Batch, Engine, Job, norm, show_root
 from ..probe import VIDEO_EXT, MediaInfo, ProbeCache
@@ -594,7 +594,7 @@ class RecastApp(App):
             todo = [m for m in fresh if not already_target(s, m, caps)]
             src = sum(m.size for m in todo)
             if not todo:
-                why = "✓ done by recast" if not fresh else "already " + CODEC_LABEL.get(s.codec, "")
+                why = "✓ done by recast" if not fresh else (skip_reason(s, fresh[0], caps) or "no saving")
                 rows.append((9.0, name, s, 0, 0, 0, why))
                 continue
             if name in measured:
@@ -609,7 +609,7 @@ class RecastApp(App):
         if not rows:
             why = idle[0][6] if idle else ""
             return Text(("✓ Nothing left to gain here — " + ("all done by recast" if "done" in why else
-                                                               "every file is already in each preset's codec")),
+                                                               "no preset would make these files smaller")),
                         style="#9ece6a")
         t = Table(box=None, padding=(0, 1), header_style="bold dim", title_justify="left",
                   title=Text("What each preset would do", style="bold"), show_edge=False, expand=False)
@@ -789,7 +789,7 @@ class RecastApp(App):
         else:
             caps = self.cfg.encoders
             b = self.engine.add_batch(res["folder"] or os.path.dirname(files[0].path), files, root, res["s"],
-                                      res["preset"], lambda m: already_target(res["s"], m, caps))
+                                      res["preset"], lambda m: skip_reason(res["s"], m, caps))
             jobs = self.engine.batch_jobs(b)
             if not jobs or not any(j.stage == "queued" for j in jobs):
                 self.notify("Nothing left to encode there — everything is done, queued or already in that codec.",

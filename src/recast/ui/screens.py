@@ -18,7 +18,7 @@ from textual.widgets import Button, Input, Label, Select, Static, Switch
 
 from .. import ffmpeg as ff
 from ..config import Config, EncoderCap, Root, default_scratch, is_network_path, machine_summary
-from ..encode import (CODEC_LABEL, CRF_SCALE, ENCODERS, QUALITY_STYLE, SPEEDS, EncodeSettings, already_target,
+from ..encode import (CODEC_LABEL, CRF_SCALE, ENCODERS, QUALITY_STYLE, SPEEDS, EncodeSettings, already_target, skip_reason,
                       bitrate_word, build_command, crf_word, enc_status, est_bytes, est_fps, pix_fmt_name, quote,
                       resolve_encoder, ten_bit)
 from .frames import FrameView, grab_frame, side_by_side
@@ -301,7 +301,7 @@ class EncodeDialog(ModalScreen):
                     yield Label("Skip if done", classes="lbl")
                     with Horizontal(classes="sw"):
                         yield Switch(s.skip_same, id="f-skip")
-                        yield Label("skip files already in target codec", classes="hint")
+                        yield Label("skip files it wouldn't shrink ≥5%", classes="hint")
                 with Horizontal(id="adv-row"):
                     yield Button("▸ Advanced  ^a", id="adv-btn")
                 with Vertical(id="adv"):
@@ -460,10 +460,11 @@ class EncodeDialog(ModalScreen):
             e.append(f"\n          {len(todo)} file{'s' * (len(todo) != 1)} to encode · {fsize(src_b)} → "
                      f"≈{fsize(out_b)} · saves ≈{fsize(src_b - out_b)} · ≈{fdur(secs)} total", "#7dcfff")
             why = []
-            n_target = len(self.files) - len(todo)
-            if n_target:
-                why.append(f"{n_target} already {CODEC_LABEL.get(s.codec, s.codec)}")
             reasons: dict[str, int] = {}
+            for f in self.files:
+                r = skip_reason(s, f, self.caps)
+                if r:
+                    reasons[r] = reasons.get(r, 0) + 1
             for r in self.skipped.values():
                 reasons[r] = reasons.get(r, 0) + 1
             why += [f"{n} {r}" for r, n in reasons.items()]

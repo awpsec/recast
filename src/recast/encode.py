@@ -401,9 +401,19 @@ def est_fps(s: EncodeSettings, m: "MediaInfo", caps: dict[str, EncoderCap]) -> f
     return max(0.5, fps * (1920 * 1080) / pixels)
 
 
+def skip_reason(s: EncodeSettings, m: "MediaInfo", caps: dict[str, EncoderCap]) -> str:
+    """Why this preset isn't worth running on this file ("" = it is). Only applies with skip_same on."""
+    if not s.skip_same:
+        return ""
+    if CODEC_LABEL.get(s.codec) == m.codec and (not m.vkbps or m.vkbps <= estimate(s, m, caps)[0] * 1.15):
+        return f"already {m.codec}"
+    if m.size and est_bytes(s, m, caps) > m.size * 0.95:
+        return "wouldn't shrink"  # e.g. a lean AV1 file vs an HEVC 1800k preset
+    return ""
+
+
 def already_target(s: EncodeSettings, m: "MediaInfo", caps: dict[str, EncoderCap]) -> bool:
-    return (s.skip_same and CODEC_LABEL.get(s.codec) == m.codec
-            and (not m.vkbps or m.vkbps <= estimate(s, m, caps)[0] * 1.15))
+    return bool(skip_reason(s, m, caps))
 
 
 # ───────────────────────────── presets ───────────────────────────────

@@ -342,7 +342,7 @@ class Engine:
         return j
 
     def add_batch(self, folder: str, media: list[MediaInfo], root, s: EncodeSettings, preset: str,
-                  skip: Callable[[MediaInfo], bool]) -> Batch:
+                  skip: Callable[[MediaInfo], object]) -> Batch:
         b = Batch(self.next_id, folder, asdict(s), preset)
         self.next_id += 1
         busy, done = self.busy_paths(), self.done_paths()
@@ -353,8 +353,8 @@ class Engine:
             j = self._job(m, root, s, preset, False, b.id)
             if key in done:
                 j.stage, j.result = "skipped", "already re-encoded by recast"
-            elif skip(m):
-                j.stage, j.result = "skipped", "already in target codec"
+            elif why := skip(m):
+                j.stage, j.result = "skipped", why if isinstance(why, str) else "not worth re-encoding"
             b.jobs.append(j.id)
         self.batches[b.id] = b
         self.touch()

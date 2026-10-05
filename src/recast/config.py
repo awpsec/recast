@@ -119,6 +119,7 @@ class Config:
     rename_codec: bool = True   # "…1080p AV1.mkv" → "…1080p HEVC.mkv" on replace
     keep_awake: bool = True     # stop idle sleep while jobs run
     preview_cadence: float = 1.0
+    last_path: str = ""  # where the library tree was; reopened on launch
     theme: str = "tokyo-night"
 
     @property

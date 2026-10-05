@@ -116,11 +116,15 @@ def parse(path: str, data: dict) -> MediaInfo:
             m.subs.append({"lang": tags.get("language", "und"), "codec": s.get("codec_name", "?"),
                            "forced": bool(disp.get("forced")) or "forced" in tags.get("title", "").lower(),
                            "title": tags.get("title", "")})
-    if not m.vkbps and m.duration and m.size:
-        total = int(fmt.get("bit_rate", 0) or 0) / 1000 or m.size * 8 / 1000 / m.duration
-        m.vkbps = max(0, int(total - sum(a["kbps"] for a in m.audio)))
     for a in m.audio:  # unknown audio bitrate: assume something sane so estimates aren't silly
         a["kbps"] = a["kbps"] or (640 if a["channels"] > 2 else 192)
+    if m.duration and m.size:
+        # What the file can actually hold. Stream tags (mkvmerge BPS) are often copied from an
+        # earlier source and can be wildly wrong, so never trust a video bitrate above this.
+        total = m.size * 8 / 1000 / m.duration
+        real_v = max(1, int(total - sum(a["kbps"] for a in m.audio) - 2 * len(m.subs)))
+        if not m.vkbps or m.vkbps > real_v * 1.1:
+            m.vkbps = real_v
     return m
 
 
@@ -131,13 +135,13 @@ class ProbeCache:
         self._lock = threading.Lock()
         self._dirty = False
         try:
-            self._data: dict = json.loads(self.file.read_text())
+            self._data: dict = {k: v for k, v in json.loads(self.file.read_text()).items() if k.startswith("v2|")}
         except (OSError, ValueError):
             self._data = {}
 
     def _key(self, path: str) -> str:
         st = os.stat(path)
-        return f"{path}|{st.st_size}|{int(st.st_mtime)}"
+        return f"v2|{path}|{st.st_size}|{int(st.st_mtime)}"  # bump vN when parse() changes
 
     def cached(self, path: str) -> MediaInfo | None:
         try:

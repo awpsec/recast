@@ -193,3 +193,40 @@ async def test_failed_job_can_be_retried_and_scratch_orphans_cleaned(home, libra
     orphan = Path(cfg.scratch, "out", "999-old.mkv")
     orphan.write_bytes(b"x" * 100)
     assert eng.clean_scratch() >= 100 and not orphan.exists() and os.path.exists(j.out)
+
+
+async def test_library_offline_waits_instead_of_failing(home, library, tmp_path):
+    cfg, eng, events = make(home, library, tmp_path)
+    season = library / "TV" / "Black Clover (2017)" / "Season 01"
+    files = [probe_now("ffprobe", str(p)) for p in sorted(season.glob("*.mkv"))]
+    s = EncodeSettings(codec="hevc", encoder="libx265", speed="ultrafast", rate_mode="crf", crf=34)
+    b = eng.add_batch(str(season), files, cfg.roots[0], s, "t", lambda m: False)
+    hidden = library.with_name("lib-unplugged")
+    library.rename(hidden)                      # NAS "unmounted" before anything started
+    for _ in range(30):
+        eng.tick()
+        await asyncio.sleep(0.05)
+    assert [j.stage for j in eng.batch_jobs(b)] == ["queued"] * 3 and ("offline", str(library)) in events
+    eng._root_seen.clear()
+    hidden.rename(library)                      # back online
+    await run_until(eng, lambda: all(j.stage == "awaiting" for j in eng.batch_jobs(b)))
+    assert ("online", str(library)) in events
+
+
+async def test_pause_all_holds_the_queue(home, library, tmp_path):
+    cfg, eng, _ = make(home, library, tmp_path)
+    src = library / "Movies" / "Test Movie (2020)" / "Test Movie (2020).mkv"
+    j = eng.add_single(probe_now("ffprobe", str(src)), cfg.roots[0],
+                       EncodeSettings(encoder="libx265", speed="veryslow"), "slow")
+    await run_until(eng, lambda: j.stage == "encoding" and j.frame > 0)
+    eng.set_hold(True)
+    await asyncio.sleep(0.6)
+    f = j.frame
+    for _ in range(10):
+        eng.tick()
+        await asyncio.sleep(0.1)
+    assert j.stage == "paused" and j.frame == f     # frozen
+    eng.set_hold(False)
+    await run_until(eng, lambda: j.frame > f)
+    eng.cancel(j)
+    await run_until(eng, lambda: j.id not in eng._tasks)

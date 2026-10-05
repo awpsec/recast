@@ -4,7 +4,7 @@ TabbedContent, TabPane { height: 1fr; }
 TabPane { padding: 0; }
 .pane { border: round $primary 50%; border-title-color: $accent; border-title-style: bold; }
 .pane:focus-within { border: round $accent; }
-#lib-tree { width: 55%; padding: 0 1; }
+#lib-tree { width: 46%; padding: 0 1; }
 #lib-right { width: 1fr; }
 #details-scroll { height: 1fr; }
 #details { height: auto; padding: 0 1; }

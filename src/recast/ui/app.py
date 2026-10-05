@@ -1,6 +1,7 @@
 """The recast TUI."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -189,6 +190,7 @@ class RecastApp(App):
                             yield Button("✗ Deny  n", id="a-deny", variant="error")
                             yield Button("↻ Retry…  r", id="a-retry", variant="warning")
                             yield Button("◧ Compare  c", id="a-compare")
+                            yield Button("✓ + rest…", id="a-rest", variant="success")
                             yield Button("Approve all passing", id="a-all")
             with TabPane("④ Presets", id="tab-presets"):
                 with Horizontal():
@@ -282,6 +284,7 @@ class RecastApp(App):
                               ("Progress", "prog", 16), ("FPS", "fps", 6), ("Size", "size", 22), ("ETA", "eta", 9)]:
             jobs.add_column(label, key=key, width=w)
         self.query_one("#job-detail").border_title = "Job"
+        self.query_one("#job-detail").border_subtitle = "space pause all · x cancel · r retry · del clear finished"
         self.query_one("#frame-panel").border_title = "Frame preview  f"
         self.query_one("#appr-list").border_title = "Awaiting approval"
         self.query_one("#appr-scroll").border_title = "Review"
@@ -292,11 +295,17 @@ class RecastApp(App):
             roots.add_column(c)
         self.set_interval(0.25, self.tick)
         self.set_interval(10, self.probes.save)
+        self.set_interval(15, self._save_cfg_if_moved)
         self.set_frame_timer()
         if self.cfg.needs_setup:
             self.push_screen(SetupScreen(self.cfg, first_run=True), self.after_setup)
         else:
             self.start()
+
+    def _save_cfg_if_moved(self) -> None:
+        if self.cfg.last_path != getattr(self, "_saved_last_path", None):
+            self._saved_last_path = self.cfg.last_path
+            self.cfg.save()
 
     def after_setup(self, ok: bool | None) -> None:
         if ok:
@@ -308,6 +317,8 @@ class RecastApp(App):
         self.probes = ProbeCache(self.cfg.ffprobe)
         self.query_one("#preset-editor", PresetEditor).caps = self.cfg.encoders
         self.build_tree()
+        if self.cfg.last_path and os.path.exists(self.cfg.last_path):
+            self.run_worker(self.reveal(self.cfg.last_path), group="reveal")
         self.refresh_settings()
         self.refresh_presets()
         self.refresh_inbox(force=True)
@@ -422,6 +433,32 @@ class RecastApp(App):
         d = event.node.data
         if isinstance(d, Node):
             self.show_details(d, event.node)
+            if not getattr(self, "_revealing", False):
+                self.cfg.last_path = d.path
+
+    async def reveal(self, path: str) -> bool:
+        """Expand the tree down to `path` (loading folders as needed) and put the cursor on it."""
+        tree = self.query_one("#lib-tree", Tree)
+        target = norm(path)
+        node = next((n for n in tree.root.children if target == norm(n.data.path)
+                     or target.startswith(norm(n.data.path) + os.sep)), None)
+        self._revealing = True
+        try:
+            while node is not None:
+                if norm(node.data.path) == target:
+                    tree.move_cursor(node)
+                    self.call_after_refresh(tree.scroll_to_node, node)
+                    return True
+                node.expand()
+                for _ in range(200):  # folders load in a worker; wait for this one (≤10 s on a slow share)
+                    if node.data.loaded:
+                        break
+                    await asyncio.sleep(0.05)
+                node = next((c for c in node.children if target == norm(c.data.path)
+                             or target.startswith(norm(c.data.path) + os.sep)), None)
+            return False
+        finally:
+            self._revealing = False
 
     @work(thread=True, group="details", exclusive=True)
     def show_details(self, d: Node, tree_node=None) -> None:
@@ -535,9 +572,12 @@ class RecastApp(App):
             rows.append((out / src - 1, name, s, len(todo), src, out, how))
         rows.sort(key=lambda r: r[0])
         t = Table(box=None, padding=(0, 1), header_style="bold dim", title_justify="left",
-                  title=Text("What each preset would do", style="bold"), show_edge=False)
-        for c, kw in (("", {}), ("Preset", {}), ("Encoder", {"style": "#7dcfff"}), ("Files", {"justify": "right"}),
-                      ("After", {"justify": "right"}), ("Saves", {"justify": "right"}), ("", {"style": "dim"})):
+                  title=Text("What each preset would do", style="bold"), show_edge=False, expand=False)
+        one_line = {"no_wrap": True, "overflow": "ellipsis"}
+        for c, kw in (("", {"width": 2}), ("Preset", {"max_width": 26, "ratio": 3, **one_line}),
+                      ("Encoder", {"style": "#7dcfff", "max_width": 14, **one_line}),
+                      ("Files", {"justify": "right", **one_line}), ("After", {"justify": "right", **one_line}),
+                      ("Saves", {"justify": "right", **one_line}), ("", {"style": "dim", **one_line})):
             t.add_column(c, **kw)
         best = next((r for r in rows if r[0] < 0), None)
         for pct, name, s, n, src, out, how in rows:
@@ -548,12 +588,19 @@ class RecastApp(App):
                 continue
             col = "bold #9ece6a" if pct <= -0.10 else "#e0af68" if pct < 0 else "bold #f7768e"
             t.add_row(mark, Text(name, style="bold" if best and name == best[1] else ""),
-                      resolve_encoder(s, caps)[0], str(n), f"≈{fsize(out)}",
-                      Text(f"{pct * 100:+.0f}%  {fsize(src - out) if out < src else ''}".rstrip(), style=col),
-                      Text(how, style="#9ece6a" if how.startswith("measured") else "dim"))
-        legend = Text("★ default  ◆ last used on this show  · measured = from files you've actually encoded here",
+                      resolve_encoder(s, caps)[0].replace("_videotoolbox", "_vt"), str(n), f"≈{fsize(out)}",
+                      Text(f"{pct * 100:+.0f}%", style=col),
+                      Text(how.replace("estimate", "est."), style="#9ece6a" if how.startswith("measured") else "dim"))
+        summary = Text()
+        dflt = next((r for r in rows if r[1] == self.cfg.default_preset and r[0] != 9.0), None)
+        for label, r in (("best", best), ("default", dflt if dflt is not best else None)):
+            if r and r[0] < 0:
+                summary.append(f"{label}: ", "dim")
+                summary.append(f"{r[1]} saves {fsize(r[4] - r[5])}", "bold #9ece6a" if label == "best" else "#9ece6a")
+                summary.append("   ")
+        legend = Text("★ default  ◆ last used here  · measured = from files you've actually encoded in this show",
                       style="dim")
-        return Group(t, legend)
+        return Group(t, summary, legend) if summary else Group(t, legend)
 
     def folder_details(self, d: Node, files, rec, probed: bool, progress=None, is_root=False) -> Group:
         parts = [Text(os.path.basename(d.path.rstrip("/\\")) or d.path, style="bold #c0caf5"),
@@ -622,9 +669,13 @@ class RecastApp(App):
             call(self.notify, "No video files here.", severity="warning")
             return
         infos, bad = [], 0
+        uncached = sum(1 for p in paths if not self.probes.cached(p))
+        if uncached > 20:
+            call(self.notify, f"Reading {uncached} file headers (first time only — cached after this)…",
+                 title="Encode", timeout=6)
         for i, p in enumerate(paths):
-            if len(paths) > 20 and i % 10 == 0 and not self.probes.cached(p):
-                call(self.notify, f"Reading headers {i}/{len(paths)}…", timeout=2)
+            if uncached > 20 and i % 25 == 0:
+                call(self._set_details, Text(f"reading headers {i}/{len(paths)}…", style="dim"))
             m = self.probes.get(p)
             if m.error:
                 bad += 1
@@ -734,6 +785,11 @@ class RecastApp(App):
             saved = sum(j.info.get("size", 0) - j.out_size for j in js)
             self.notify(f"{len(js)} files replaced · saved {fsize(saved)}", title=f"✓ {_short(obj.folder)} done")
             self.refresh_dirs({os.path.dirname(j.src) for j in js})
+        elif kind == "offline":
+            self.notify(f"Can't reach {obj}. Jobs there wait (nothing fails) until it's back.",
+                        title="⚠ Library offline", severity="warning", timeout=15)
+        elif kind == "online":
+            self.notify(f"{obj} is reachable again — continuing.", title="✓ Library back", timeout=6)
         elif kind == "no_space":
             j, free, need = obj
             self.notify(f"{j.name} is waiting: scratch has {fsize(free)} free, needs ≈{fsize(need)}. Free space or "
@@ -836,9 +892,9 @@ class RecastApp(App):
         self._frame_timer = self.set_interval(CADENCES[self.cadence][1], self.update_frame)
 
     def action_pause(self) -> None:
-        j = next((j for j in self.engine.jobs.values() if j.stage in ("encoding", "paused")), None)
-        if j and self.engine.toggle_pause(j):
-            self.notify("Paused" if j.stage == "paused" else "Resumed", timeout=2)
+        self.engine.set_hold(not self.engine.hold)
+        self.notify("Paused — the running encode is frozen and nothing new starts. space to resume."
+                    if self.engine.hold else "Resumed", title="Queue", timeout=4)
 
     def action_cancel_job(self) -> None:
         j = self.selected_job
@@ -859,6 +915,7 @@ class RecastApp(App):
             self.call_later(self._shutdown)
 
     async def _shutdown(self) -> None:
+        self.cfg.save()
         await self.engine.shutdown()
         self.probes.save()
         self.exit()
@@ -1200,6 +1257,12 @@ class RecastApp(App):
             acts[bid]()
         elif bid == "btn-refresh":
             self.build_tree()
+        elif bid == "a-rest":
+            item = self.highlighted_item()
+            if isinstance(item, Job):
+                self.prompt_for(item)
+            else:
+                self.notify("That's already a batch — approving it covers the rest.", timeout=4)
         elif bid == "a-all":
             for item in self.engine.inbox():
                 if not (isinstance(item, Job) and item.flag):
@@ -1359,6 +1422,12 @@ class RecastApp(App):
             for kind in self.arr.clients:
                 ok = kind not in self.arr.errors
                 t.append(f"{'●' if ok else '○'} {kind} ", "#9ece6a" if ok else "#f7768e")
+        if self.engine.hold:
+            t.append(" │ ", "dim")
+            t.append("❚❚ queue paused (space)", "bold #e0af68")
+        if self.engine.offline:
+            t.append(" │ ", "dim")
+            t.append("⚠ library offline", "bold #f7768e")
         n = len(self.engine.inbox())
         if n:
             t.append(" │ ", "dim")

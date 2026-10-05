@@ -161,6 +161,9 @@ class Engine:
         self._dirty = False
         self._last_save = 0.0
         self._space_warned: set[int] = set()
+        self.hold = False            # paused by the user: start nothing new
+        self.offline: set[str] = set()  # library roots that aren't reachable right now
+        self._root_seen: dict[str, tuple[float, bool]] = {}
         self._awake = None
         # permanent, compact record of every replaced file: drives "measured" savings,
         # per-show preset memory and "already done" skipping. Jobs themselves are pruned.
@@ -341,12 +344,34 @@ class Engine:
         return True
 
     # ── scheduling (called ~4x a second by the app) ──
+    def root_ok(self, j: Job) -> bool:
+        """Is this job's library folder reachable? Checked at most every 5 s per folder (a hung share
+        can make stat() slow); transitions are reported once so the UI can say so."""
+        now = time.monotonic()
+        last = self._root_seen.get(j.root_path)
+        if last and now - last[0] < 5:
+            return last[1]
+        ok = os.path.isdir(j.root_path)
+        self._root_seen[j.root_path] = (now, ok)
+        if ok and j.root_path in self.offline:
+            self.offline.discard(j.root_path)
+            self.on_event("online", j.root_path)
+        elif not ok and j.root_path not in self.offline:
+            self.offline.add(j.root_path)
+            self.on_event("offline", j.root_path)
+        return ok
+
     def tick(self) -> None:
         jobs = list(self.jobs.values())
+        if self.hold:
+            self._keep_awake(any(j.stage in ("copying", "replacing") for j in jobs))
+            self.save()
+            return
         by = lambda st: sorted((j for j in jobs if j.stage == st), key=lambda j: (not j.preview, j.id))
         busy_copy = any(j.stage == "copying" for j in jobs)
         live = any(j.stage in LIVE for j in jobs)
         ready, queued = by("ready"), by("queued")
+        queued = [j for j in queued if self.root_ok(j)]  # cached per folder, so cheap
         if not busy_copy and (not ready or not self.cfg.prefetch and not live) and queued:
             j = queued[0]
             over = self.held_bytes() > self.cfg.max_scratch_gb * 1024**3
@@ -366,7 +391,7 @@ class Engine:
             self._start(ready[0], "encoding", self._encode)
         if not any(j.stage == "replacing" for j in jobs):
             nxt = next((j for j in sorted(jobs, key=lambda j: j.id) if j.stage == "to_replace"), None)
-            if nxt:
+            if nxt and self.root_ok(nxt):
                 self._start(nxt, "replacing", self._replace)
         self._keep_awake(any(j.stage in ("copying", "ready", "encoding", "verifying", "replacing") for j in jobs))
         self.save()
@@ -428,7 +453,14 @@ class Engine:
         except Cancelled:
             pass
         except OSError as e:
-            self._fail(j, f"copy failed: {e}")
+            if not os.path.isdir(j.root_path):  # the share went away: wait for it, don't fail
+                _rm(j.work_src + ".part")
+                j.stage, j.copied = "queued", 0
+                j.add_log(f"library went offline during copy — will retry ({e})")
+                self._root_seen.pop(j.root_path, None)
+                self.root_ok(j)
+            else:
+                self._fail(j, f"copy failed: {e}")
         self.touch()
 
     def _copy_file(self, src: str, dst: str, j: Job, counter: str) -> None:
@@ -598,6 +630,13 @@ class Engine:
             self.touch()
             return
         except OSError as e:
+            if not os.path.isdir(j.root_path):  # share dropped mid write-back: the original is untouched
+                j.stage = "to_replace"
+                j.add_log(f"library went offline during replace — will retry ({e})")
+                self._root_seen.pop(j.root_path, None)
+                self.root_ok(j)
+                self.touch()
+                return
             j.stage, j.error = "awaiting", f"replace failed: {e}"
             j.add_log(j.error)
             self.on_event("failed", j)
@@ -732,15 +771,15 @@ class Engine:
             self._cleanup(j)
         self.touch()
 
-    def toggle_pause(self, j: Job) -> bool:
-        p = self._procs.get(j.id)
-        if not p or p.returncode is not None or j.stage not in ("encoding", "paused"):
-            return False
-        pause = j.stage == "encoding"
-        self._signal(p.pid, cont=not pause)
-        j.stage = "paused" if pause else "encoding"
+    def set_hold(self, on: bool) -> None:
+        """Pause everything: the running encode is frozen and nothing new starts (copies/replaces in flight finish)."""
+        self.hold = on
+        for j in self.jobs.values():
+            p = self._procs.get(j.id)
+            if p and p.returncode is None and j.stage in ("encoding", "paused"):
+                self._signal(p.pid, cont=not on)
+                j.stage = "paused" if on else "encoding"
         self.touch()
-        return True
 
     @staticmethod
     def _signal(pid: int, cont: bool) -> None:
@@ -773,6 +812,7 @@ class Engine:
                 pass
 
     async def shutdown(self) -> None:
+        self._keep_awake(False)
         for jid, p in list(self._procs.items()):
             if p.returncode is None:
                 j = self.jobs.get(jid)

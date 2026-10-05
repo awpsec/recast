@@ -125,3 +125,13 @@ def test_new_default_presets_are_offered_once(home):
     assert "AV1 · smallest" in first
     delete_preset("AV1 · smallest")
     assert "AV1 · smallest" not in load_presets()  # a deleted default stays deleted
+
+
+def test_stale_bps_tag_is_not_trusted():
+    from recast.probe import parse
+    data = {"format": {"size": str(1081 * 1024**2), "duration": "2580", "format_name": "matroska"},
+            "streams": [{"codec_type": "video", "codec_name": "av1", "width": 1920, "height": 1080,
+                         "avg_frame_rate": "24000/1001", "tags": {"BPS": "5737801"}},
+                        {"codec_type": "audio", "codec_name": "ac3", "channels": 6, "tags": {"BPS": "448000"}}]}
+    m = parse("/x.mkv", data)
+    assert 2800 < m.vkbps < 3200, m.vkbps   # size/duration says ~3.0 Mb/s video, not the tag's 5.7

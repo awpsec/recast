@@ -233,9 +233,10 @@ class RecastApp(App):
                     yield Static("Replacing", classes="set-section")
                     with Horizontal(classes="set-row"):
                         yield Label("Originals on replace")
-                        yield Select([("Move to .recast-trash/ (auto-purged)", "trash"), ("Keep alongside as .orig", "keep"),
-                                      ("Delete immediately", "delete")], value=self.cfg.originals, allow_blank=False,
-                                     id="s-originals")
+                        yield Select([("Move to .recast-trash/ (undo with u until purged)", "trash"),
+                                      ("Keep alongside as .orig (undo with u)", "keep"),
+                                      ("Delete immediately (no undo!)", "delete")], value=self.cfg.originals,
+                                     allow_blank=False, id="s-originals")
                     with Horizontal(classes="set-row"):
                         yield Label("Keep trash for (days)")
                         yield Input(str(self.cfg.trash_days), id="s-trashdays", type="integer")
@@ -244,6 +245,10 @@ class RecastApp(App):
                         yield Switch(self.cfg.rename_codec, id="s-rename")
                         yield Label("“…1080p AV1.mkv” becomes “…1080p HEVC.mkv” (never overwrites another file)",
                                     classes="hint")
+                    with Horizontal(classes="set-row"):
+                        yield Label("Desktop notifications")
+                        yield Switch(self.cfg.desktop_notify, id="s-notify")
+                        yield Label("when a batch finishes or something needs your approval", classes="hint")
                     with Horizontal(classes="set-row"):
                         yield Label("Keep computer awake")
                         yield Switch(self.cfg.keep_awake, id="s-awake")
@@ -403,11 +408,24 @@ class RecastApp(App):
         if d.loaded:
             return
         d.loaded = True
+        tree = self.query_one("#lib-tree", Tree)
+        cur = tree.cursor_node.data.path if tree.cursor_node and isinstance(tree.cursor_node.data, Node) else None
         node.remove_children()
         for p in dirs:
             node.add(Text(os.path.basename(p)), data=Node("dir", p, d.root), allow_expand=True)
         for p, size in files:
             node.add_leaf(self.file_label(p, size, cached.get(p)), data=Node("file", p, d.root, size=size))
+        if getattr(d, "refreshing", False):
+            d.refreshing = False
+            # keep the cursor where it was (same file, or the file that replaced it) and redraw details
+            folder = norm(os.path.dirname(cur)) if cur else ""
+            if cur and folder == norm(d.path):
+                old = os.path.basename(cur)
+                pick = max(node.children, default=None,
+                           key=lambda c: len(os.path.commonprefix([old, os.path.basename(c.data.path)])))
+                if pick:
+                    tree.move_cursor(pick)
+                    self.show_details(pick.data, pick)
 
     def file_label(self, path: str, size: int, m: MediaInfo | None) -> Text:
         key = norm(path)
@@ -791,8 +809,35 @@ class RecastApp(App):
         tbl.move_cursor(row=tbl.get_row_index(str(first.id)))
 
     # ── engine events ──
+    def desktop(self, title: str, body: str) -> None:
+        """OS notification for things worth walking back to the computer for."""
+        if not self.cfg.desktop_notify:
+            return
+        import shutil
+        import subprocess
+        import sys
+        try:
+            if sys.platform == "darwin":
+                esc = lambda x: x.replace("\\", "\\\\").replace('"', '\\"')
+                subprocess.Popen(["osascript", "-e", f'display notification "{esc(body)}" with title "recast" '
+                                  f'subtitle "{esc(title)}"'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            elif sys.platform.startswith("linux") and shutil.which("notify-send"):
+                subprocess.Popen(["notify-send", f"recast · {title}", body],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            pass
+
     def on_engine_event(self, kind: str, obj) -> None:
         self.refresh_inbox()
+        if kind == "finished":
+            self.desktop("Encode finished", f"{obj.name} is ready for review")
+        elif kind == "batch_done":
+            self.desktop("Batch encoded", f"{_short(obj.folder)}: one approval waiting")
+        elif kind == "batch_replaced":
+            self.desktop("Batch done", f"{_short(obj.folder)} replaced in the library")
+        elif kind in ("failed", "offline", "no_space"):
+            self.desktop({"failed": "Job failed", "offline": "Library offline", "no_space": "Out of scratch space"}[kind],
+                         getattr(obj, "name", str(obj if kind == "offline" else obj[0].name)))
         if kind == "finished":
             if len(self.screen_stack) == 1:
                 self.prompt_for(obj)
@@ -859,6 +904,7 @@ class RecastApp(App):
             d = node.data
             if isinstance(d, Node) and d.kind == "dir" and d.loaded and norm(d.path) in want:
                 d.loaded = False
+                d.refreshing = True
                 self.load_dir(node)
 
     # ── actions ──
@@ -1294,7 +1340,7 @@ class RecastApp(App):
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
         attr = {"s-prefetch": "prefetch", "s-verify": "verify_decode", "s-rescan": "rescan_after_replace",
-                "s-rename": "rename_codec", "s-awake": "keep_awake"}.get(
+                "s-rename": "rename_codec", "s-awake": "keep_awake", "s-notify": "desktop_notify"}.get(
             event.switch.id or "")
         if attr:
             setattr(self.cfg, attr, event.value)

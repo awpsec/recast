@@ -118,6 +118,7 @@ class Config:
     verify_decode: bool = True
     rename_codec: bool = True   # "…1080p AV1.mkv" → "…1080p HEVC.mkv" on replace
     keep_awake: bool = True     # stop idle sleep while jobs run
+    desktop_notify: bool = True # OS notification when something needs you
     preview_cadence: float = 1.0
     last_path: str = ""  # where the library tree was; reopened on launch
     theme: str = "tokyo-night"

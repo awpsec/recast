@@ -23,7 +23,7 @@ async def test_episode_then_rest_of_season(home, tmp_path):
         make_library.episode(season / f"Show - S01E0{e} 1080p AV1.mkv",
                              ["-c:v", "libsvtav1", "-preset", "12", "-crf", "24"], secs=4)
     Config(roots=[Root("Lib", str(lib), remote=True)], scratch=str(tmp_path / "scratch"), ffmpeg="ffmpeg",
-           ffprobe="ffprobe", ffmpeg_version="test", machine={"host": "test"},
+           ffprobe="ffprobe", ffmpeg_version="test", machine={"host": "test"}, desktop_notify=False,
            encoders={"libx265": EncoderCap("ok", 60), "libx264": EncoderCap("ok", 150),
                      "libsvtav1": EncoderCap("ok", 80)}).save()
     app = RecastApp()

@@ -247,10 +247,13 @@ class Engine:
         return {norm(h["final"]) for h in self.history if h.get("final") and not h.get("restored")}
 
     def record_for(self, path: str) -> dict | None:
-        """The history entry for a library file recast produced, if any."""
+        """The history entry for a library file recast produced, if any (with `orig` located if possible)."""
         key = norm(path)
-        return next((h for h in reversed(self.history) if h.get("final") and norm(h["final"]) == key
-                     and not h.get("restored")), None)
+        h = next((h for h in reversed(self.history) if h.get("final") and norm(h["final"]) == key
+                  and not h.get("restored")), None)
+        if h and not (h.get("orig") and os.path.exists(h["orig"])):
+            h["orig"] = _find_original(h["src"]) or h.get("orig", "")
+        return h
 
     def restore(self, path: str) -> str:
         """Undo a replace: the original goes back, the re-encode is set aside in the trash. Blocking."""
@@ -901,6 +904,26 @@ class Engine:
                     shutil.rmtree(e.path, ignore_errors=True)
                     removed.append(e.path)
         return removed
+
+
+def _find_original(src: str) -> str:
+    """Where an original went: <root>/.recast-trash/<date>/<same subfolders>/<name>, or <name>.orig."""
+    if os.path.exists(src + ".orig"):
+        return src + ".orig"
+    d, name = os.path.dirname(src), os.path.basename(src)
+    a = d
+    for _ in range(8):
+        t = os.path.join(a, ".recast-trash")
+        if os.path.isdir(t):
+            rel = os.path.relpath(d, a)
+            hits = sorted(p for day in os.listdir(t) if os.path.isfile(p := os.path.join(t, day, rel, name)))
+            if hits:
+                return hits[-1]
+        parent = os.path.dirname(a)
+        if parent == a:
+            break
+        a = parent
+    return ""
 
 
 def _free(path: str) -> int | None:

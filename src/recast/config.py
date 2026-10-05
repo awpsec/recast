@@ -116,6 +116,8 @@ class Config:
     trash_days: int = 14
     rescan_after_replace: bool = True
     verify_decode: bool = True
+    rename_codec: bool = True   # "…1080p AV1.mkv" → "…1080p HEVC.mkv" on replace
+    keep_awake: bool = True     # stop idle sleep while jobs run
     preview_cadence: float = 1.0
     theme: str = "tokyo-night"
 

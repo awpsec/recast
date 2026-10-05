@@ -3,7 +3,6 @@
     python tests/make_library.py /path/to/lib
 """
 import subprocess
-import sys
 from pathlib import Path
 
 SRT = "1\n00:00:01,000 --> 00:00:03,000\nHello from recast\n\n2\n00:00:04,000 --> 00:00:06,000\nSecond line\n"

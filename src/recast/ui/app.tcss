@@ -83,3 +83,7 @@ EncodeDialog, ApprovalPrompt, NamePrompt, HelpScreen, SetupScreen, CompareScreen
 #cmp-box { width: 96%; height: 94%; border: thick $accent; background: $surface; padding: 0 1; }
 #cmp-cap { height: 1; }
 PresetEditor .text-area--suggestion { color: #565f89; text-style: italic; }
+#enc-note { height: auto; padding: 0 0 0 0; }
+#appr-rest-btns { height: 3; }
+#appr-rest-btns Button { margin-right: 1; }
+#appr-rest-hint { margin: 1 0 0 0; }

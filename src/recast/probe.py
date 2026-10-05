@@ -20,6 +20,7 @@ VIDEO_EXT = {".mkv", ".mp4", ".m4v", ".avi", ".ts", ".m2ts", ".mov", ".wmv", ".w
 class MediaInfo:
     path: str
     size: int = 0
+    mtime: float = 0.0
     duration: float = 0.0
     container: str = ""
     codec: str = "?"
@@ -149,11 +150,14 @@ class ProbeCache:
         """Probe (blocking; call from a thread). Reads only container headers, not the whole file."""
         hit = self.cached(path)
         if hit:
+            if not hit.mtime:
+                hit.mtime = os.stat(path).st_mtime
             return hit
         try:
             r = run([self.ffprobe, "-v", "error", "-print_format", "json", "-show_format", "-show_streams",
                      path], timeout=60)
             m = parse(path, json.loads(r.stdout or "{}"))
+            m.mtime = os.stat(path).st_mtime
             if r.returncode != 0 and not m.codec_name:
                 m.error = (r.stderr.strip().splitlines() or ["ffprobe failed"])[-1][:120]
         except Exception as e:  # noqa: BLE001 — surfaced in the UI
@@ -177,4 +181,9 @@ class ProbeCache:
 
 def probe_now(ffprobe: str, path: str) -> MediaInfo:
     r = run([ffprobe, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", path], 60)
-    return parse(path, json.loads(r.stdout or "{}"))
+    m = parse(path, json.loads(r.stdout or "{}"))
+    try:
+        m.mtime = os.stat(path).st_mtime
+    except OSError:
+        pass
+    return m

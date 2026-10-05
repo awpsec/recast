@@ -21,7 +21,7 @@ from ..arr import ArrClient, ArrError, ArrIndex, auto_map
 from ..config import Config, Root, is_network_path
 from ..encode import (CODEC_LABEL, EncodeSettings, already_target, delete_preset, est_bytes, load_presets,
                       preset_doc, resolve_encoder, save_preset)
-from ..engine import ACTIVE, LIVE, Batch, Engine, Job
+from ..engine import ACTIVE, LIVE, Batch, Engine, Job, norm, show_root
 from ..probe import VIDEO_EXT, MediaInfo, ProbeCache
 from .editor import PresetEditor
 from .frames import FrameView, load_image
@@ -123,6 +123,7 @@ class RecastApp(App):
         Binding("r", "retry", "Retry", show=False),
         Binding("c", "compare", "Compare", show=False),
         Binding("ctrl+s", "save_preset", "Save preset", show=False),
+        Binding("delete", "clear_finished", "Clear finished", show=False),
         *[Binding(str(i + 1), f"tab('{t}')", show=False) for i, t in
           enumerate(["tab-library", "tab-queue", "tab-approvals", "tab-presets", "tab-settings"])],
     ]
@@ -235,6 +236,15 @@ class RecastApp(App):
                         yield Label("Keep trash for (days)")
                         yield Input(str(self.cfg.trash_days), id="s-trashdays", type="integer")
                     with Horizontal(classes="set-row"):
+                        yield Label("Update codec in filename")
+                        yield Switch(self.cfg.rename_codec, id="s-rename")
+                        yield Label("“…1080p AV1.mkv” becomes “…1080p HEVC.mkv” (never overwrites another file)",
+                                    classes="hint")
+                    with Horizontal(classes="set-row"):
+                        yield Label("Keep computer awake")
+                        yield Switch(self.cfg.keep_awake, id="s-awake")
+                        yield Label("block idle sleep while copying / encoding / replacing", classes="hint")
+                    with Horizontal(classes="set-row"):
                         yield Label("Decode test")
                         yield Switch(self.cfg.verify_decode, id="s-verify")
                         yield Label("decode first/last 20 s of every output before it can replace", classes="hint")
@@ -309,6 +319,9 @@ class RecastApp(App):
 
     @work(thread=True)
     def housekeeping(self) -> None:
+        freed = self.engine.clean_scratch()
+        if freed > 1024**2:
+            self.call_from_thread(self.notify, f"Cleaned {fsize(freed)} of leftovers from scratch.", title="Scratch")
         removed = self.engine.purge_trash()
         if removed:
             self.call_from_thread(self.notify, f"Purged {len(removed)} old trash folder(s).", title="Trash")
@@ -432,15 +445,16 @@ class RecastApp(App):
             is_root = any(os.path.normcase(r.path) == os.path.normcase(d.path) for r in self.cfg.roots)
             files = self.walk(d.path, limit=0 if is_root else 3000)
             call(self._set_details, self.folder_details(d, files, rec, probed=False, is_root=is_root))
-            if not is_root and len(files) <= 400:
-                for i, (p, _) in enumerate(files):
+            if not is_root and len(files) <= 2000:
+                todo = [p for p, _ in files if not self.probes.cached(p)]
+                for i, p in enumerate(todo):
                     if worker.is_cancelled:
                         return
-                    if not self.probes.cached(p):
-                        self.probes.get(p)
-                        if i % 5 == 0:
-                            call(self._set_details, self.folder_details(d, files, rec, probed=False,
-                                                                         progress=(i + 1, len(files))))
+                    self.probes.get(p)
+                    if i % 10 == 9:
+                        call(self._set_details, self.folder_details(d, files, rec, probed=False,
+                                                                     progress=(len(files) - len(todo) + i + 1,
+                                                                               len(files))))
                 call(self._set_details, self.folder_details(d, files, rec, probed=True))
 
     def walk(self, path: str, limit: int) -> list[tuple[str, int]]:
@@ -486,15 +500,60 @@ class RecastApp(App):
             elif rec.get("quality"):
                 t.append(f" · {rec['quality']}")
             parts.append(t)
-        parts += [Text(""), g, Text("")]
-        pname = self.cfg.default_preset if self.cfg.default_preset in self.presets else next(iter(self.presets))
-        s = self.presets[pname][1]
-        est = est_bytes(s, m, self.cfg.encoders)
-        parts.append(Text.assemble(("With ", "dim"), (pname, "#e0af68"), (": ", "dim"), f"{fsize(m.size)} → ≈{fsize(est)} ",
-                                   (f"({(est / max(1, m.size) - 1) * 100:+.0f}%)",
-                                    "bold #9ece6a" if est < m.size else "bold #f7768e"),
-                                   (f" · {resolve_encoder(s, self.cfg.encoders)[0]}", "dim")))
+        parts += [Text(""), g]
+        if norm(m.path) in self.engine.done_paths():
+            parts += [Text(""), Text("✓ already re-encoded by recast", style="#9ece6a")]
+        parts += [Text(""), self.preset_gains([m], d.path)]
+        parts.append(Text("\ne → encode this file", style="dim"))
         return Group(*parts)
+
+    def preset_gains(self, infos: list[MediaInfo], path: str):
+        """Every preset, what it would do to these files: measured on this show when we have real results."""
+        caps = self.cfg.encoders
+        done = self.engine.done_paths()
+        measured = self.engine.measured(path)
+        last = self.engine.last_used(path)
+        last_name = last["preset"].rstrip("*") if last else None
+        rows = []
+        options = list(self.presets.items())
+        if last and last["preset"].endswith("*") and last["preset"] in measured:
+            # what you actually ran here last time (a tweaked preset) gets its own row
+            options.insert(0, (last["preset"], ("", EncodeSettings(**last["settings"]))))
+        for name, (_desc, s) in options:
+            fresh = [m for m in infos if norm(m.path) not in done]
+            todo = [m for m in fresh if not already_target(s, m, caps)]
+            src = sum(m.size for m in todo)
+            if not todo:
+                why = "✓ done by recast" if not fresh else "already " + CODEC_LABEL.get(s.codec, "")
+                rows.append((9.0, name, s, 0, 0, 0, why))
+                continue
+            if name in measured:
+                ratio, n = measured[name]
+                out, how = src * ratio, f"measured · {n} file{'s' * (n != 1)}"
+            else:
+                out, how = sum(est_bytes(s, m, caps) for m in todo), "estimate"
+            rows.append((out / src - 1, name, s, len(todo), src, out, how))
+        rows.sort(key=lambda r: r[0])
+        t = Table(box=None, padding=(0, 1), header_style="bold dim", title_justify="left",
+                  title=Text("What each preset would do", style="bold"), show_edge=False)
+        for c, kw in (("", {}), ("Preset", {}), ("Encoder", {"style": "#7dcfff"}), ("Files", {"justify": "right"}),
+                      ("After", {"justify": "right"}), ("Saves", {"justify": "right"}), ("", {"style": "dim"})):
+            t.add_column(c, **kw)
+        best = next((r for r in rows if r[0] < 0), None)
+        for pct, name, s, n, src, out, how in rows:
+            mark = Text.assemble(("★" if name == self.cfg.default_preset else " ", "#e0af68"),
+                                 ("◆" if name == last_name or last and name == last["preset"] else " ", "#bb9af7"))
+            if pct == 9.0:
+                t.add_row(mark, Text(name, style="dim"), "", "0", "—", Text("—", style="dim"), how)
+                continue
+            col = "bold #9ece6a" if pct <= -0.10 else "#e0af68" if pct < 0 else "bold #f7768e"
+            t.add_row(mark, Text(name, style="bold" if best and name == best[1] else ""),
+                      resolve_encoder(s, caps)[0], str(n), f"≈{fsize(out)}",
+                      Text(f"{pct * 100:+.0f}%  {fsize(src - out) if out < src else ''}".rstrip(), style=col),
+                      Text(how, style="#9ece6a" if how.startswith("measured") else "dim"))
+        legend = Text("★ default  ◆ last used on this show  · measured = from files you've actually encoded here",
+                      style="dim")
+        return Group(t, legend)
 
     def folder_details(self, d: Node, files, rec, probed: bool, progress=None, is_root=False) -> Group:
         parts = [Text(os.path.basename(d.path.rstrip("/\\")) or d.path, style="bold #c0caf5"),
@@ -524,47 +583,75 @@ class RecastApp(App):
                 leg.append_text(badge(c))
                 leg.append(f" {fsize(b)}  ")
             parts += [bar, leg]
-            pname = self.cfg.default_preset if self.cfg.default_preset in self.presets else next(iter(self.presets))
-            s = self.presets[pname][1]
-            todo = [m for m in infos if not already_target(s, m, self.cfg.encoders)]
-            est = sum(est_bytes(s, m, self.cfg.encoders) for m in todo)
-            src = sum(m.size for m in todo)
-            parts += [Text(""), Text.assemble(("With ", "dim"), (pname, "#e0af68"), (": ", "dim"),
-                                              f"{len(todo)} files to encode · {fsize(src)} → ≈{fsize(est)} · ",
-                                              (f"saves ≈{fsize(src - est)}", "bold #9ece6a"))]
-        if len(files) > 400 and not probed:
+            done = self.engine.done_paths()
+            n_done = sum(1 for m in infos if norm(m.path) in done)
+            busy = sum(1 for p, _ in files if norm(p) in self.engine.busy_paths())
+            extra = []
+            if n_done:
+                extra.append(f"✓ {n_done} already re-encoded by recast")
+            if busy:
+                extra.append(f"● {busy} in the queue / awaiting approval")
+            if extra:
+                parts.append(Text("  ·  ".join(extra), style="#9ece6a"))
+            partial = len(infos) < len(files)
+            parts += [Text(""), self.preset_gains(infos, d.path)]
+            if partial:
+                parts.append(Text(f"(based on {len(infos)} of {len(files)} files so far)", style="dim italic"))
+        if len(files) > 2000 and not probed:
             parts.append(Text("Large folder: headers are read when you press e.", style="dim"))
         parts.append(Text("\ne → try 1 file first, or encode the whole folder", style="dim"))
         return Group(*parts)
 
     # ── encode flow ──
     def action_encode(self) -> None:
-        self.start_encode()
+        d = self.current_node()
+        if d:
+            self.start_encode(d.path, d.kind == "dir")
 
     @work(thread=True, group="encode", exclusive=True)
-    def start_encode(self) -> None:
-        d = self.current_node()
-        if not d:
-            return
+    def start_encode(self, path: str, is_dir: bool, settings: EncodeSettings | None = None,
+                     preset: str | None = None, exclude: str | None = None) -> None:
         call = self.call_from_thread
-        if any(os.path.normcase(r.path) == os.path.normcase(d.path) for r in self.cfg.roots):
+        if any(os.path.normcase(r.path) == os.path.normcase(path) for r in self.cfg.roots):
             call(self.notify, "That's a whole library folder. Pick a show, season or movie.", severity="warning")
             return
-        paths = [d.path] if d.kind == "file" else [p for p, _ in self.walk(d.path, 100000)]
+        paths = [p for p, _ in self.walk(path, 100000)] if is_dir else [path]
+        if exclude:
+            paths = [p for p in paths if norm(p) != norm(exclude)]
         if not paths:
             call(self.notify, "No video files here.", severity="warning")
             return
-        infos = []
+        infos, bad = [], 0
         for i, p in enumerate(paths):
             if len(paths) > 20 and i % 10 == 0 and not self.probes.cached(p):
-                call(self._set_details, Text(f"reading headers {i}/{len(paths)}…", style="dim"))
+                call(self.notify, f"Reading headers {i}/{len(paths)}…", timeout=2)
             m = self.probes.get(p)
-            if not m.error:
+            if m.error:
+                bad += 1
+            else:
                 infos.append(m)
         if not infos:
             call(self.notify, "Couldn't read any of those files with ffprobe.", severity="error")
             return
-        title = Text.assemble(("Encode  ", "bold"), (d.path, "bold #c0caf5"), "   ")
+        busy, done = self.engine.busy_paths(), self.engine.done_paths()
+        skipped = {norm(m.path): ("already queued / awaiting approval" if norm(m.path) in busy
+                                  else "already re-encoded by recast")
+                   for m in infos if norm(m.path) in busy or norm(m.path) in done}
+        if bad:
+            skipped["__unreadable__"] = f"{bad} unreadable file{'s' * (bad != 1)}"
+        if not is_dir and skipped and norm(path) in busy:
+            call(self.notify, "That file already has a job — see the Queue / Approvals tab.", severity="warning")
+            return
+        last = self.engine.last_used(path)
+        note = None
+        if settings is None and last and last["preset"].rstrip("*") in self.presets:
+            preset, settings = last["preset"].rstrip("*"), EncodeSettings(**last["settings"])
+            m = self.engine.measured(path).get(last["preset"])
+            note = Text.assemble(("◆ Last used on this show: ", "#bb9af7"), (last["preset"], "bold"),
+                                 (f" — {os.path.basename(last['src'])}", "dim"),
+                                 (f"  {(m[0] - 1) * 100:+.0f}% measured" if m else "", "#9ece6a"),
+                                 ("  (still in progress)" if last.get("pending") else "", "dim"))
+        title = Text.assemble(("Encode  ", "bold"), (path, "bold #c0caf5"), "   ")
         if len(infos) == 1:
             m = infos[0]
             title.append_text(badge(m.codec))
@@ -574,9 +661,9 @@ class RecastApp(App):
             for c in sorted({m.codec for m in infos}):
                 title.append_text(badge(c))
                 title.append(" ")
-        call(self.open_dialog, title, infos, None, None, d.path if d.kind == "dir" else None, None)
+        call(self.open_dialog, title, infos, settings, preset, path if is_dir else None, None, skipped, note)
 
-    def open_dialog(self, title, infos, settings, preset, folder, on_done) -> None:
+    def open_dialog(self, title, infos, settings, preset, folder, on_done, skipped=None, note=None) -> None:
         def done(res):
             if not res:
                 return
@@ -584,7 +671,8 @@ class RecastApp(App):
                 on_done()
             self.enqueue(res)
         self.push_screen(EncodeDialog(title, infos, self.cfg, self.presets, preset or self.cfg.default_preset,
-                                      settings, folder), done)
+                                      settings, folder, skipped=skipped or {}, note=note,
+                                      measured=self.engine.measured(folder or infos[0].path)), done)
 
     def enqueue(self, res: dict) -> None:
         files = res["files"]
@@ -593,17 +681,29 @@ class RecastApp(App):
             self.notify("That file isn't inside a library folder.", severity="error")
             return
         if len(files) == 1:
+            n_before = len(self.engine.jobs)
             j = self.engine.add_single(files[0], root, res["s"], res["preset"], preview=True)
             first = j
-            self.notify(f"Encoding {j.name} with {res['preset']}", title="Queue")
+            if len(self.engine.jobs) == n_before:
+                self.notify(f"{j.name} already has a job ({j.stage}).", title="Queue", severity="warning")
+            else:
+                self.notify(f"Encoding {j.name} with {res['preset']}", title="Queue")
         else:
             caps = self.cfg.encoders
             b = self.engine.add_batch(res["folder"] or os.path.dirname(files[0].path), files, root, res["s"],
                                       res["preset"], lambda m: already_target(res["s"], m, caps))
             jobs = self.engine.batch_jobs(b)
+            if not jobs or not any(j.stage == "queued" for j in jobs):
+                self.notify("Nothing left to encode there — everything is done, queued or already in that codec.",
+                            title="Queue", severity="warning")
+                if not jobs:
+                    del self.engine.batches[b.id]
+                return
             first = next((j for j in jobs if j.stage == "queued"), jobs[0])
             n = sum(1 for j in jobs if j.stage == "queued")
-            self.notify(f"Queued {n} files from {_short(b.folder)} · one approval for the batch", title="Queue")
+            skipped = len(jobs) - n
+            self.notify(f"Queued {n} files from {_short(b.folder)} · one approval for the batch"
+                        + (f"\n{skipped} skipped (already done / in that codec)" if skipped else ""), title="Queue")
         self.sync_job_rows()
         self.selected_job = first
         self.action_tab("tab-queue")
@@ -615,7 +715,7 @@ class RecastApp(App):
         self.refresh_inbox()
         if kind == "finished":
             if len(self.screen_stack) == 1:
-                self.push_screen(ApprovalPrompt(obj, self.cfg.encoders), lambda r, j=obj: self.decide(j, r or "later"))
+                self.prompt_for(obj)
             else:
                 self.notify(f"{obj.name} is waiting in Approvals", title="⚑ Encode finished")
         elif kind == "batch_first":
@@ -628,10 +728,17 @@ class RecastApp(App):
                         severity="warning")
         elif kind == "replaced":
             self.notify(f"{obj.name}\n{obj.result}", title="✓ Replaced in library")
+            self.refresh_dirs({os.path.dirname(obj.src)})
         elif kind == "batch_replaced":
             js = self.engine.batch_jobs(obj, "replaced")
             saved = sum(j.info.get("size", 0) - j.out_size for j in js)
             self.notify(f"{len(js)} files replaced · saved {fsize(saved)}", title=f"✓ {_short(obj.folder)} done")
+            self.refresh_dirs({os.path.dirname(j.src) for j in js})
+        elif kind == "no_space":
+            j, free, need = obj
+            self.notify(f"{j.name} is waiting: scratch has {fsize(free)} free, needs ≈{fsize(need)}. Free space or "
+                        "approve/deny finished encodes.", title="❚❚ Not enough scratch space", severity="warning",
+                        timeout=15)
         elif kind == "failed":
             self.notify(f"{obj.name}: {obj.error}", title="✗ Job failed", severity="error", timeout=12)
         elif kind == "budget":
@@ -639,6 +746,35 @@ class RecastApp(App):
                 self._budget_warned = True
                 self.notify("Scratch budget reached — approve the batch so finished files can move back to the "
                             "library, then it continues.", title="❚❚ Batch waiting", timeout=12)
+
+    @work(thread=True, group="prompt")
+    def prompt_for(self, j: Job) -> None:
+        """Approval prompt for a single file, offering to carry the same settings to the rest of the show."""
+        season, show = os.path.dirname(j.src), show_root(j.src)
+        rest = []
+        n_season = len([p for p, _ in self.walk(season, 5000)]) - 1
+        if n_season > 0:
+            rest.append((f"rest of {os.path.basename(season)} ({n_season})", season))
+        if norm(show) != norm(season) and not any(norm(r.path) == norm(show) for r in self.cfg.roots):
+            n_show = len(self.walk(show, 20000)) - 1
+            if n_show > n_season:
+                rest.append((f"whole show ({n_show})", show))
+        self.call_from_thread(self._push_prompt, j, rest)
+
+    def _push_prompt(self, j: Job, rest) -> None:
+        if len(self.screen_stack) > 1 or j.stage != "awaiting":
+            self.notify(f"{j.name} is waiting in Approvals", title="⚑ Encode finished")
+            return
+        self.push_screen(ApprovalPrompt(j, self.cfg.encoders, rest), lambda r, j=j: self.decide(j, r or "later"))
+
+    def refresh_dirs(self, dirs: set[str]) -> None:
+        """Re-list folders whose files recast just replaced so names/codecs/sizes are current."""
+        want = {norm(d) for d in dirs}
+        for node in list(self.query_one("#lib-tree", Tree)._tree_nodes.values()):
+            d = node.data
+            if isinstance(d, Node) and d.kind == "dir" and d.loaded and norm(d.path) in want:
+                d.loaded = False
+                self.load_dir(node)
 
     # ── actions ──
     def check_action(self, action: str, parameters) -> bool | None:
@@ -746,6 +882,9 @@ class RecastApp(App):
             self.notify("Discarded. Originals untouched.", timeout=3)
         elif what == "compare" and isinstance(item, Job):
             self.push_screen(CompareScreen(item, self.cfg.ffmpeg))
+        elif what.startswith("rest:") and isinstance(item, Job):
+            self.engine.approve(item)
+            self.start_encode(what[5:], True, item.s, item.preset.rstrip("*"), exclude=item.src)
         elif what == "retry":
             if isinstance(item, Batch):
                 files = [j.media for j in self.engine.batch_jobs(item)]
@@ -765,7 +904,25 @@ class RecastApp(App):
         self.decide(self.highlighted_item(), "deny")
 
     def action_retry(self) -> None:
+        if self.query_one("#tabs", TabbedContent).active == "tab-queue":
+            j = self.selected_job
+            if j and self.engine.requeue(j):
+                self.notify(f"Retrying {j.name}", timeout=3)
+            elif j:
+                self.notify("Only failed or cancelled jobs can be retried here.", timeout=3)
+            return
         self.decide(self.highlighted_item(), "retry")
+
+    def action_clear_finished(self) -> None:
+        gone = self.engine.forget_finished()
+        tbl = self.query_one("#jobs", DataTable)
+        for jid in gone:
+            if jid in self._rows:
+                tbl.remove_row(str(jid))
+                del self._rows[jid]
+        if self.selected_job and self.selected_job.id in gone:
+            self.selected_job = None
+        self.notify(f"Cleared {len(gone)} finished job{'s' * (len(gone) != 1)} from the list.", timeout=3)
 
     def action_compare(self) -> None:
         item = self.highlighted_item()
@@ -1018,7 +1175,8 @@ class RecastApp(App):
         c.save()
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
-        attr = {"s-prefetch": "prefetch", "s-verify": "verify_decode", "s-rescan": "rescan_after_replace"}.get(
+        attr = {"s-prefetch": "prefetch", "s-verify": "verify_decode", "s-rescan": "rescan_after_replace",
+                "s-rename": "rename_codec", "s-awake": "keep_awake"}.get(
             event.switch.id or "")
         if attr:
             setattr(self.cfg, attr, event.value)

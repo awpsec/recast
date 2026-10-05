@@ -228,14 +228,22 @@ class EncodeDialog(ModalScreen):
     BINDINGS = [Binding("escape", "dismiss(None)", "Cancel"), Binding("ctrl+a", "toggle_adv", "Advanced")]
 
     def __init__(self, title: str, files: list, cfg: Config, presets: dict, preset_name: str,
-                 settings: EncodeSettings | None = None, folder: str | None = None):
+                 settings: EncodeSettings | None = None, folder: str | None = None,
+                 skipped: dict | None = None, note=None, measured: dict | None = None):
         super().__init__()
-        self.title_text, self.files, self.cfg, self.presets = title, files, cfg, presets
+        self.title_text, self.cfg, self.presets = title, cfg, presets
         self.caps = cfg.encoders
         self.folder = folder
+        self.note = note
+        self.measured = measured or {}
+        self.skipped = dict(skipped or {})
+        self.unreadable = self.skipped.pop("__unreadable__", "")
+        self.all_files = files
+        self.files = [f for f in files if os.path.normcase(os.path.abspath(f.path)) not in self.skipped] or files
         self.preset_name = preset_name if preset_name in presets else next(iter(presets))
-        self.sample = files[0]
         self.initial = settings or presets[self.preset_name][1]
+        # the "try 1 file first" candidate: first file that actually needs this encode
+        self.sample = next((f for f in self.files if not already_target(self.initial, f, self.caps)), self.files[0])
 
     def compose(self) -> ComposeResult:
         s = self.initial
@@ -243,11 +251,13 @@ class EncodeDialog(ModalScreen):
         multi = len(self.files) > 1
         with Vertical(id="enc-box"):
             yield Static(id="enc-title")
+            if self.note:
+                yield Static(self.note, id="enc-note")
             with VerticalScroll(id="enc-body"):
                 with Horizontal(id="preset-row"):
                     yield Label("Preset", classes="lbl")
                     yield sel("f-preset", [("✎ Custom (on the fly)", "__custom__")] + [(k, k) for k in self.presets],
-                              self.preset_name if settings_match(self.presets, self.preset_name, s) else "__custom__")
+                              self.preset_name)
                     yield Static(id="preset-state")
                 yield Static("── Basic ─────────────────────────────", classes="section")
                 with Grid(classes="grid4"):
@@ -312,7 +322,7 @@ class EncodeDialog(ModalScreen):
                 yield Static(id="cmd")
                 yield Static(id="est")
             with Horizontal(id="enc-buttons"):
-                if multi:
+                if len(self.all_files) > 1:
                     yield Button("▶ Try 1 file first", id="go-preview", variant="primary")
                     yield Button(f"⏵⏵ Encode all {len(self.files)}", id="go-all", variant="warning")
                 else:
@@ -325,6 +335,7 @@ class EncodeDialog(ModalScreen):
         self.set_adv(bool(s.extra or s.encoder != "auto" or s.tune != "none" or s.maxrate))
         self.query_one("#enc-title", Static).update(self.title_text)
         self.update_preview()
+        self.call_after_refresh(setattr, self, "_ready", True)
 
     def read(self) -> EncodeSettings:
         q = lambda i: self.query_one(f"#{i}")
@@ -377,6 +388,7 @@ class EncodeDialog(ModalScreen):
             st.update(Text("● modified from preset", style="#e0af68"))
         else:
             st.update(Text(self.presets[name][0], style="dim"))
+        self.sample = next((f for f in self.files if not already_target(s, f, self.caps)), self.sample)
         m = self.sample
         src = os.path.join(self.cfg.scratch, "in", os.path.basename(m.path)) if self._remote else m.path
         out = os.path.join(self.cfg.scratch, "out", os.path.splitext(os.path.basename(m.path))[0] + "." + s.container)
@@ -400,7 +412,7 @@ class EncodeDialog(ModalScreen):
         e.append("Estimate  ", "bold")
         e.append(f"{fsize(m.size)} → ≈{fsize(per)} ")
         e.append(f"({(per / max(1, m.size) - 1) * 100:+.0f}%)", "bold #9ece6a" if per < m.size else "bold #f7768e")
-        e.append(" for this file\n          ")
+        e.append(f" for {os.path.basename(m.path) if len(self.all_files) > 1 else 'this file'}\n          ")
         e.append(enc, "bold #7dcfff")
         e.append(f" on {self.cfg.machine.get('host', 'this machine')}" + (" (auto)" if note == "auto" else ""))
         e.append(f" · ~{fps:.0f} fps · ≈{fdur(m.frames / fps if m.frames else m.duration)} per file")
@@ -408,15 +420,37 @@ class EncodeDialog(ModalScreen):
             e.append(f"\n          ⚠ {note}", "#e0af68")
         if m.hdr == "Dolby Vision" and s.codec != "copy":
             e.append("\n          ⚠ Dolby Vision layer is dropped; the HDR10 base layer is kept", "#e0af68")
-        if len(self.files) > 1:
+        same = name != "__custom__" and settings_match(self.presets, name, s)
+        meas = self.measured.get(name) if same else None
+        if meas:
+            e.append(f"\n          measured on this show: {(meas[0] - 1) * 100:+.0f}% over {meas[1]} file"
+                     f"{'s' * (meas[1] != 1)}", "#9ece6a")
+        multi = len(self.all_files) > 1
+        if multi:
             todo = [f for f in self.files if not already_target(s, f, self.caps)]
             src_b = sum(f.size for f in todo)
-            out_b = sum(est_bytes(s, f, self.caps) for f in todo)
+            out_b = src_b * meas[0] if meas else sum(est_bytes(s, f, self.caps) for f in todo)
             secs = sum((f.frames or f.duration * 24) / est_fps(s, f, self.caps) for f in todo)
-            e.append(f"\n          {len(todo)}/{len(self.files)} files to encode · {fsize(src_b)} → ≈{fsize(out_b)}"
-                     f" · saves ≈{fsize(src_b - out_b)} · ≈{fdur(secs)} total", "#7dcfff")
-            if len(todo) < len(self.files):
-                e.append(f"  ({len(self.files) - len(todo)} skipped: already target codec)", "dim")
+            e.append(f"\n          {len(todo)} file{'s' * (len(todo) != 1)} to encode · {fsize(src_b)} → "
+                     f"≈{fsize(out_b)} · saves ≈{fsize(src_b - out_b)} · ≈{fdur(secs)} total", "#7dcfff")
+            why = []
+            n_target = len(self.files) - len(todo)
+            if n_target:
+                why.append(f"{n_target} already {CODEC_LABEL.get(s.codec, s.codec)}")
+            reasons: dict[str, int] = {}
+            for r in self.skipped.values():
+                reasons[r] = reasons.get(r, 0) + 1
+            why += [f"{n} {r}" for r, n in reasons.items()]
+            if self.unreadable:
+                why.append(self.unreadable)
+            if why:
+                e.append("\n          skipping: " + " · ".join(why), "dim")
+            try:
+                btn = self.query_one("#go-all", Button)
+                btn.label = f"⏵⏵ Encode {len(todo)} file{'s' * (len(todo) != 1)}"
+                btn.disabled = not todo
+            except Exception:
+                pass
         self.query_one("#est", Static).update(e)
 
     @property
@@ -430,8 +464,8 @@ class EncodeDialog(ModalScreen):
             enc.set_options(encoder_options(event.value, self.caps))
             valid = ["copy"] if event.value == "copy" else ["auto", *ENCODERS[event.value]]
             enc.value = cur if cur in valid else valid[0]
-        if event.select.id == "f-preset" and event.value != "__custom__":
-            self.load(self.presets[event.value][1])
+        if event.select.id == "f-preset" and event.value != "__custom__" and getattr(self, "_ready", False):
+            self.load(self.presets[event.value][1])  # only when the user picks one, never during mount
         self.update_preview()
 
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -549,9 +583,10 @@ class ApprovalPrompt(ModalScreen):
                 Binding("n", "dismiss('deny')", "Deny"), Binding("r", "dismiss('retry')", "Retry"),
                 Binding("c", "dismiss('compare')", "Compare")]
 
-    def __init__(self, job, caps):
+    def __init__(self, job, caps, rest: list | None = None):
         super().__init__()
         self.job, self.caps = job, caps
+        self.rest = rest or []  # [(label, folder path)]: approve this one, then encode those with the same settings
 
     def compose(self) -> ComposeResult:
         j = self.job
@@ -566,9 +601,26 @@ class ApprovalPrompt(ModalScreen):
                 yield Button("↻ Retry…  r", id="retry", variant="warning")
                 yield Button("◧ Compare  c", id="compare")
                 yield Button("Later  esc", id="later")
+            if self.rest and not j.flag:
+                yield Static(Text("Happy with it? Approve this one and queue the rest with the same settings "
+                                  "(one approval for the batch):", style="dim"), id="appr-rest-hint")
+                with Horizontal(id="appr-rest-btns"):
+                    for i, (label, _path) in enumerate(self.rest):
+                        yield Button(f"✓ Approve + {label}  {'as'[i]}", id=f"rest{i}", variant="success")
+
+    def on_key(self, event) -> None:
+        if event.key in ("a", "s") and not self.job.flag:
+            i = "as".index(event.key)
+            if i < len(self.rest):
+                event.stop()
+                self.dismiss("rest:" + self.rest[i][1])
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss(event.button.id)
+        bid = event.button.id or ""
+        if bid.startswith("rest"):
+            self.dismiss("rest:" + self.rest[int(bid[4:])][1])
+        else:
+            self.dismiss(bid)
 
 
 class CompareScreen(ModalScreen):

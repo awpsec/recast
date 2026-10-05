@@ -1,12 +1,11 @@
-import json
 import shutil
 
 import pytest
 
 from recast.config import EncoderCap
-from recast.encode import EncodeSettings, build_command, resolve_encoder, estimate, quote
+from recast.encode import EncodeSettings, build_command, resolve_encoder, quote
 from recast.ffmpeg import parse_progress
-from recast.probe import MediaInfo, parse, probe_now
+from recast.probe import MediaInfo, probe_now
 
 MAC = {"libx265": EncoderCap("ok", 60), "hevc_videotoolbox": EncoderCap("ok", 320),
        "hevc_qsv": EncoderCap("missing"), "libx264": EncoderCap("ok", 150), "libsvtav1": EncoderCap("ok", 80)}
@@ -95,3 +94,34 @@ def test_probe_real_file(library_template):
     side = next((library_template / "TV" / "Avatar (2005)" / "Season 01").glob("*.mkv"))
     m2 = probe_now("ffprobe", str(side))
     assert m2.codec == "MPEG-2" and m2.audio[0]["channels"] == 6
+
+
+def test_mp4_converts_audio_it_cant_hold_and_mkv_converts_mov_text():
+    m = media(audio=[{"lang": "eng", "codec": "truehd", "channels": 8, "kbps": 4000},
+                     {"lang": "eng", "codec": "ac3", "channels": 6, "kbps": 640}],
+              subs=[{"lang": "eng", "codec": "mov_text", "forced": False}])
+    argv = flat(build_command(EncodeSettings(container="mp4"), m, "i", "o.mp4", MAC))
+    assert argv[argv.index("-c:a:0") + 1] == "eac3" and "-c:a:1" not in argv
+    argv = flat(build_command(EncodeSettings(container="mkv"), m, "i", "o.mkv", MAC))
+    assert argv[argv.index("-c:s:0") + 1] == "srt" and "-c:a:0" not in argv
+
+
+def test_rename_and_show_root(tmp_path):
+    from recast.engine import renamed_for_codec, show_root
+    assert renamed_for_codec("Show - S13E15 1080p AV1", "hevc") == "Show - S13E15 1080p HEVC"
+    assert renamed_for_codec("Show.S01E01.1080p.WEB.x264-GRP", "hevc") == "Show.S01E01.1080p.WEB.HEVC-GRP"
+    assert renamed_for_codec("Avatar (2009)", "hevc") == "Avatar (2009)"          # no token, no change
+    assert renamed_for_codec("Lavc AV1ish", "hevc") == "Lavc AV1ish"              # whole tokens only
+    s1 = tmp_path / "TV" / "Show" / "Season 01"
+    s1.mkdir(parents=True)
+    assert show_root(str(s1)) == str(tmp_path / "TV" / "Show")
+    assert show_root(str(s1 / "ep.mkv")) == str(tmp_path / "TV" / "Show")
+    assert show_root(str(tmp_path / "Movies" / "Film (2001)" / "Film.mkv")) == str(tmp_path / "Movies" / "Film (2001)")
+
+
+def test_new_default_presets_are_offered_once(home):
+    from recast.encode import delete_preset, load_presets
+    first = load_presets()
+    assert "AV1 · smallest" in first
+    delete_preset("AV1 · smallest")
+    assert "AV1 · smallest" not in load_presets()  # a deleted default stays deleted

@@ -114,3 +114,82 @@ async def test_longer_clip_passes_decode_test(home, tmp_path):
     await run_until(eng, lambda: j.stage in ("awaiting", "failed"))
     assert j.stage == "awaiting" and not j.flag, (j.flag, j.error)
     assert any("verify passed" in l for l in j.log)
+
+
+async def _encoded(eng, cfg, path, **kw):
+    j = eng.add_single(probe_now("ffprobe", str(path)), cfg.roots[0],
+                       EncodeSettings(codec="hevc", encoder="libx265", speed="ultrafast", rate_mode="crf", crf=34, **kw),
+                       "HEVC test")
+    await run_until(eng, lambda: j.stage in ("awaiting", "failed"))
+    assert j.stage == "awaiting" and not j.flag, (j.flag, j.error)
+    return j
+
+
+async def test_source_changed_is_never_overwritten(home, library, tmp_path):
+    cfg, eng, events = make(home, library, tmp_path)
+    src = next((library / "TV" / "Black Clover (2017)" / "Season 01").glob("*E002*"))
+    j = await _encoded(eng, cfg, src)
+    with open(src, "ab") as fh:  # Sonarr "upgraded" the file while we were busy
+        fh.write(b"\0" * 1024)
+    before = src.stat().st_size
+    eng.approve(j)
+    await run_until(eng, lambda: j.stage in ("awaiting", "replaced", "failed") and j.id not in eng._tasks)
+    assert j.stage == "awaiting" and "changed since it was encoded" in j.flag
+    assert src.stat().st_size == before and probe_now("ffprobe", str(src)).codec == "AV1"
+    assert not list(src.parent.glob(".recast-*.part"))
+
+
+async def test_codec_rename_collision_and_trash(home, library, tmp_path):
+    cfg, eng, _ = make(home, library, tmp_path)
+    season = library / "TV" / "Black Clover (2017)" / "Season 01"
+    a = season / "Black Clover - S01E005 1080p AV1.mkv"
+    b = season / "Black Clover - S01E006 1080p AV1.mkv"
+    first = next(season.glob("*E001*"))
+    import shutil as _sh
+    _sh.copy(first, a)
+    _sh.copy(first, b)
+    (season / "Black Clover - S01E006 1080p HEVC.mkv").write_bytes(b"someone else's file")
+    ja, jb = await _encoded(eng, cfg, a), await _encoded(eng, cfg, b)
+    eng.approve(ja)
+    eng.approve(jb)
+    await run_until(eng, lambda: ja.stage == "replaced" and jb.stage == "awaiting" and jb.flag)
+    assert (season / "Black Clover - S01E005 1080p HEVC.mkv").exists() and not a.exists()
+    assert "already exists" in jb.flag and b.exists()
+    assert (season / "Black Clover - S01E006 1080p HEVC.mkv").read_bytes() == b"someone else's file"
+    assert (library / ".recast-trash" / ".plexignore").read_text().strip() == "*"
+
+
+async def test_no_duplicate_jobs_and_done_files_skipped(home, library, tmp_path):
+    cfg, eng, _ = make(home, library, tmp_path)
+    season = library / "TV" / "Black Clover (2017)" / "Season 01"
+    files = [probe_now("ffprobe", str(p)) for p in sorted(season.glob("*.mkv"))]
+    s = EncodeSettings(codec="hevc", encoder="libx265", speed="ultrafast", rate_mode="crf", crf=34, skip_same=False)
+    j1 = eng.add_single(files[0], cfg.roots[0], s, "HEVC test")
+    assert eng.add_single(files[0], cfg.roots[0], s, "HEVC test") is j1        # same file twice → same job
+    await run_until(eng, lambda: j1.stage == "awaiting")
+    eng.approve(j1)
+    await run_until(eng, lambda: j1.stage == "replaced")
+    assert eng.last_used(str(season))["preset"] == "HEVC test"
+    ratio, n = eng.measured(str(season))["HEVC test"]
+    assert n == 1 and 0 < ratio < 1
+    files = [probe_now("ffprobe", str(p)) for p in sorted(season.glob("*.mkv"))]   # E001 is now HEVC
+    b = eng.add_batch(str(season), files, cfg.roots[0], s, "HEVC test", lambda m: False)
+    stages = {os.path.basename(j.src)[:22]: (j.stage, j.result) for j in eng.batch_jobs(b)}
+    assert stages["Black Clover - S01E001"] == ("skipped", "already re-encoded by recast"), stages
+    assert sum(1 for j in eng.batch_jobs(b) if j.stage == "queued") == 2
+
+
+async def test_failed_job_can_be_retried_and_scratch_orphans_cleaned(home, library, tmp_path):
+    cfg, eng, _ = make(home, library, tmp_path)
+    src = next((library / "TV" / "Black Clover (2017)" / "Season 01").glob("*E003*"))
+    j = eng.add_single(probe_now("ffprobe", str(src)), cfg.roots[0],
+                       EncodeSettings(encoder="libx265", extra="-this-flag-does-not-exist 1"), "bad")
+    await run_until(eng, lambda: j.stage == "failed")
+    assert "this-flag-does-not-exist" in j.error or j.error
+    j.settings["extra"] = ""
+    assert eng.requeue(j)
+    await run_until(eng, lambda: j.stage in ("awaiting", "failed"))
+    assert j.stage == "awaiting", j.error
+    orphan = Path(cfg.scratch, "out", "999-old.mkv")
+    orphan.write_bytes(b"x" * 100)
+    assert eng.clean_scratch() >= 100 and not orphan.exists() and os.path.exists(j.out)

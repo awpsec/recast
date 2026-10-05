@@ -74,6 +74,8 @@ QSV_PRESET = dict(zip(SPEEDS, ["veryfast", "veryfast", "veryfast", "faster", "fa
                                "slower", "veryslow"]))
 X26X_SPEED = dict(zip(SPEEDS, [3.3, 2.8, 2.2, 1.7, 1.4, 1.0, 0.52, 0.22, 0.1]))  # fps vs medium
 TEXT_SUBS = {"subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"}
+MP4_BAD_AUDIO = {"truehd", "mlp", "dts", "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_bluray", "pcm_dvd", "wmav2",
+                 "wmapro", "vorbis"}
 # mkvmerge statistics tags describe the *source* stream; on a re-encoded stream they're lies
 STAT_TAGS = ["BPS", "NUMBER_OF_FRAMES", "NUMBER_OF_BYTES", "_STATISTICS_WRITING_APP",
              "_STATISTICS_WRITING_DATE_UTC", "_STATISTICS_TAGS"]
@@ -220,6 +222,11 @@ def build_command(s: EncodeSettings, m: "MediaInfo", src: str, out: str, caps: d
     a_idx = _audio_indices(s, m)
     if s.audio == "copy":
         a = ["-c:a", "copy"]
+        if s.container == "mp4":  # mp4 can't hold these; convert just those tracks
+            for n, i in enumerate(a_idx):
+                if m.audio[i].get("codec") in MP4_BAD_AUDIO:
+                    multi = m.audio[i].get("channels", 2) > 2
+                    a += [f"-c:a:{n}", "eac3" if multi else "aac", f"-b:a:{n}", "640k" if multi else "256k"]
     elif s.audio == "aac_stereo":
         a = ["-c:a", "aac", "-ac", "2", "-b:a", "192k"]
     else:
@@ -228,8 +235,13 @@ def build_command(s: EncodeSettings, m: "MediaInfo", src: str, out: str, caps: d
             a += [f"-b:a:{n}", f"{min(8, max(1, m.audio[i].get('channels', 2))) * 64}k"]
         if any(m.audio[i].get("channels", 2) > 2 for i in a_idx):
             a += ["-mapping_family", "1"]
-    if _sub_indices(s, m):
+    subs = _sub_indices(s, m)
+    if subs:
         a += ["-c:s", "mov_text" if s.container == "mp4" else "copy"]
+        if s.container == "mkv":  # mkv can't hold mov_text (mp4 sources): make those srt
+            for n, i in enumerate(subs):
+                if m.subs[i].get("codec") == "mov_text":
+                    a += [f"-c:s:{n}", "srt"]
     if s.container == "mkv":
         a += ["-c:t", "copy"]
     g.append(a)
@@ -329,6 +341,9 @@ def default_presets() -> dict[str, tuple[str, EncodeSettings]]:
         "DVD rescue (MPEG-2 → HEVC)": (
             "Deinterlace + CRF 19 for old SD sources.",
             S(codec="hevc", encoder="libx265", rate_mode="crf", crf=19, speed="slow", deinterlace=True)),
+        "AV1 · smallest": (
+            "AV1 at quality 30 (SVT-AV1 / NVENC AV1). Smallest files; needs newer TVs/clients.",
+            S(codec="av1", rate_mode="crf", crf=30, speed="slow")),
         "H.264 max compat · 720p": (
             "For ancient TVs. MP4, stereo AAC, text subs only.",
             S(codec="h264", resolution="720", rate_mode="crf", crf=21, audio="aac_stereo",
@@ -350,10 +365,23 @@ def preset_doc(name: str, desc: str, s: EncodeSettings) -> dict:
 
 def load_presets() -> dict[str, tuple[str, EncodeSettings]]:
     d = presets_dir()
-    if not d.exists() or not any(d.glob("*.json")):
-        d.mkdir(parents=True, exist_ok=True)
-        for name, (desc, s) in default_presets().items():
+    d.mkdir(parents=True, exist_ok=True)
+    # Offer each built-in preset once: new ones appear after an upgrade, deleted ones stay deleted.
+    marker = d / ".offered"
+    try:
+        offered = set(json.loads(marker.read_text()))
+    except (OSError, ValueError):
+        offered = set()
+        for f in d.glob("*.json"):
+            try:
+                offered.add(json.loads(f.read_text()).get("name", ""))
+            except (OSError, ValueError):
+                pass
+    for name, (desc, s) in default_presets().items():
+        if name not in offered:
             save_preset(name, desc, s)
+            offered.add(name)
+    marker.write_text(json.dumps(sorted(offered)))
     out: dict[str, tuple[str, EncodeSettings]] = {}
     for p in sorted(d.glob("*.json")):
         try:

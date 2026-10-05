@@ -1,0 +1,85 @@
+Screen { background: $background; }
+#topbar { dock: top; height: 1; background: $panel; padding: 0 1; }
+TabbedContent, TabPane { height: 1fr; }
+TabPane { padding: 0; }
+.pane { border: round $primary 50%; border-title-color: $accent; border-title-style: bold; }
+.pane:focus-within { border: round $accent; }
+#lib-tree { width: 55%; padding: 0 1; }
+#lib-right { width: 1fr; }
+#details-scroll { height: 1fr; }
+#details { height: auto; padding: 0 1; }
+#lib-actions, #appr-actions, #preset-actions { height: 3; padding: 0 1; }
+#lib-actions Button, #appr-actions Button, #preset-actions Button, #enc-buttons Button,
+#appr-box-btns Button, #setup-btns Button { margin-right: 1; min-width: 10; }
+#jobs { height: 12; }
+#queue-bottom { height: 1fr; }
+#job-detail { width: 1fr; padding: 0 1; }
+#frame-panel { width: 1.25fr; }
+#frame-caption { height: 1; padding: 0 1; background: $boost; }
+#jd-title, #jd-pipeline { height: auto; }
+#jd-pipeline { margin: 1 0; }
+.pbrow { height: 1; }
+.pblbl { width: 8; color: $text-muted; }
+.pbrow ProgressBar { width: 1fr; }
+.pbrow Bar { width: 1fr; }
+.pbinfo { height: 1; color: $text-muted; padding-left: 8; margin-bottom: 1; }
+#jd-stats { height: auto; margin-bottom: 1; }
+#jd-spark-lbl { height: 1; color: $text-muted; }
+#jd-spark { height: 3; }
+#jd-log { height: 1fr; color: $text-muted; margin-top: 1; text-wrap: nowrap; text-overflow: ellipsis; }
+#appr-list, #preset-list { width: 46; }
+#appr-right, #preset-right { width: 1fr; }
+#appr-scroll { height: 1fr; }
+#appr-detail { height: auto; padding: 0 1; }
+#preset-help { height: auto; padding: 0 1; color: $text-muted; }
+#preset-editor { height: 1fr; }
+#preset-diag { height: auto; max-height: 5; padding: 0 1; }
+#settings-scroll { padding: 0 2; }
+.set-section { margin-top: 1; color: $accent; text-style: bold; }
+.set-row { height: 3; }
+.set-row Label { width: 26; padding-top: 1; color: $text-muted; }
+.set-row Label.hint { width: 1fr; }
+.set-row Input { width: 1fr; }
+.set-row Select { width: 1fr; }
+.set-row Button { margin-right: 1; }
+.set-row Switch { margin-right: 2; }
+#roots { height: auto; max-height: 8; margin: 0 0 1 0; }
+.hint { color: $text-muted; }
+
+EncodeDialog, ApprovalPrompt, NamePrompt, HelpScreen, SetupScreen, CompareScreen, ConfirmScreen {
+    align: center middle; background: $background 70%;
+}
+#enc-box { width: 120; max-width: 98%; height: 96%; border: thick $accent; background: $surface; padding: 0 1; }
+#enc-title { height: 2; padding-top: 1; }
+#enc-body { height: 1fr; }
+#preset-row { height: 3; }
+#preset-row Select { width: 46; }
+#preset-state { padding: 1 0 0 2; width: 1fr; }
+.section { color: $accent; margin-top: 1; }
+.grid4 { grid-size: 4; grid-columns: 15 1fr 15 1fr; grid-rows: 3; grid-gutter: 0 1; height: auto; }
+.lbl { padding-top: 1; color: $text-muted; width: 16; }
+.lbl2 { padding-top: 1; color: $text-muted; width: 16; margin-left: 2; }
+.sw { height: 3; }
+#adv-row { height: 3; margin-top: 1; }
+#adv { height: auto; }
+#extra-row { height: 3; }
+#extra-row Input { width: 1fr; }
+#cmd { background: $boost; padding: 1 2; height: auto; }
+#est { padding: 1 0 0 0; height: auto; }
+#enc-buttons { height: 3; dock: bottom; margin-bottom: 1; }
+#appr-box { width: 100; max-width: 98%; height: auto; border: thick $secondary; background: $surface; padding: 1 2; }
+#appr-box Static { margin-bottom: 1; }
+#appr-box-btns { height: 3; }
+#name-box { width: 72; height: auto; border: thick $accent; background: $surface; padding: 1 2; }
+#name-box Horizontal { height: 3; margin-top: 1; }
+#help-box { width: 90; height: auto; border: thick $accent; background: $surface; padding: 1 2; }
+#setup-box { width: 120; max-width: 98%; height: 94%; border: thick $accent; background: $surface; padding: 1 2; }
+#setup-scroll { height: 1fr; }
+#setup-log { height: auto; }
+#setup-box .row { height: 3; }
+#setup-box .row Input { width: 1fr; }
+#setup-box .hint { padding-left: 16; }
+#setup-btns { height: 3; margin-top: 1; }
+#cmp-box { width: 96%; height: 94%; border: thick $accent; background: $surface; padding: 0 1; }
+#cmp-cap { height: 1; }
+PresetEditor .text-area--suggestion { color: #565f89; text-style: italic; }

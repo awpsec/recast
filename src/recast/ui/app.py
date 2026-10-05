@@ -125,6 +125,7 @@ class RecastApp(App):
         Binding("c", "compare", "Compare", show=False),
         Binding("ctrl+s", "save_preset", "Save preset", show=False),
         Binding("delete", "clear_finished", "Clear finished", show=False),
+        Binding("u", "restore", "Restore original", show=False),
         *[Binding(str(i + 1), f"tab('{t}')", show=False) for i, t in
           enumerate(["tab-library", "tab-queue", "tab-approvals", "tab-presets", "tab-settings"])],
     ]
@@ -543,8 +544,17 @@ class RecastApp(App):
                 t.append(f" · {rec['quality']}")
             parts.append(t)
         parts += [Text(""), g]
-        if norm(m.path) in self.engine.done_paths():
-            parts += [Text(""), Text("✓ already re-encoded by recast", style="#9ece6a")]
+        h = self.engine.record_for(m.path)
+        if h:
+            when = time.strftime("%b %d", time.localtime(h.get("when", 0)))
+            t = Text(f"✓ re-encoded by recast on {when} with {h['preset']}: {fsize(h['src_size'])} → "
+                     f"{fsize(h['out_size'])} ({(h['out_size'] / max(1, h['src_size']) - 1) * 100:+.0f}%)",
+                     style="#9ece6a")
+            orig = h.get("orig", "")
+            if orig and os.path.exists(orig):
+                t.append("\n↶ original kept in the trash — press u to put it back", style="#7dcfff")
+            parts += [Text(""), t]
+            return Group(*parts)
         parts += [Text(""), self.preset_gains([m], d.path)]
         parts.append(Text("\ne → encode this file", style="dim"))
         return Group(*parts)
@@ -856,7 +866,7 @@ class RecastApp(App):
         if len(self.screen_stack) > 1 and action not in ("quit_app",):
             return False
         if isinstance(self.focused, (Input, PresetEditor)) and action in (
-                "encode", "jump", "toggle_frame", "pause", "cancel_job", "approve", "deny", "retry", "compare",
+                "encode", "jump", "restore", "toggle_frame", "pause", "cancel_job", "approve", "deny", "retry", "compare",
                 "cadence", "tab", "quit_app", "help"):
             return False
         return True
@@ -988,6 +998,37 @@ class RecastApp(App):
                 self.notify("Only failed or cancelled jobs can be retried here.", timeout=3)
             return
         self.decide(self.highlighted_item(), "retry")
+
+    def action_restore(self) -> None:
+        d = self.current_node()
+        if self.query_one("#tabs", TabbedContent).active != "tab-library" or not d or d.kind != "file":
+            return
+        h = self.engine.record_for(d.path)
+        if not h:
+            self.notify("Only files recast re-encoded can be restored.", timeout=3)
+            return
+
+        def go(yes: bool) -> None:
+            if yes:
+                self.restore_file(d.path)
+        self.push_screen(ConfirmScreen(f"Put the original back?\n\n{os.path.basename(h['src'])} returns to the "
+                                       f"library; {os.path.basename(h['final'])} is moved to the trash.",
+                                       yes="↶ Restore original", no="Cancel"), go)
+
+    @work(thread=True, group="restore")
+    def restore_file(self, path: str) -> None:
+        try:
+            msg = self.engine.restore(path)
+        except Exception as e:  # noqa: BLE001
+            self.call_from_thread(self.notify, str(e), title="Can't restore", severity="error")
+            return
+        if self.arr and self.cfg.rescan_after_replace:
+            try:
+                self.arr.rescan(path)
+            except Exception:  # noqa: BLE001
+                pass
+        self.call_from_thread(self.notify, msg, title="↶ Restored")
+        self.call_from_thread(self.refresh_dirs, {os.path.dirname(path)})
 
     def action_clear_finished(self) -> None:
         gone = self.engine.forget_finished()

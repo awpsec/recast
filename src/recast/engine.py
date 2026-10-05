@@ -97,6 +97,7 @@ class Job:
     waiting_since: float = 0.0
     out_info: dict = field(default_factory=dict)
     final: str = ""  # path of the new file in the library after replace
+    orig: str = ""   # where the original went (trash / .orig), for undo
     log: list = field(default_factory=list)
     spark: list = field(default_factory=list)
 
@@ -243,7 +244,36 @@ class Engine:
 
     def done_paths(self) -> set[str]:
         """Library files recast itself produced (so 'encode all' never redoes them)."""
-        return {norm(h["final"]) for h in self.history if h.get("final")}
+        return {norm(h["final"]) for h in self.history if h.get("final") and not h.get("restored")}
+
+    def record_for(self, path: str) -> dict | None:
+        """The history entry for a library file recast produced, if any."""
+        key = norm(path)
+        return next((h for h in reversed(self.history) if h.get("final") and norm(h["final"]) == key
+                     and not h.get("restored")), None)
+
+    def restore(self, path: str) -> str:
+        """Undo a replace: the original goes back, the re-encode is set aside in the trash. Blocking."""
+        h = self.record_for(path)
+        if not h:
+            raise NotReplaced("recast didn't produce this file")
+        orig = h.get("orig", "")
+        if not orig or not os.path.exists(orig):
+            raise NotReplaced("the original is no longer in the trash (purged or deleted)")
+        final, src = h["final"], h["src"]
+        if norm(src) != norm(final) and os.path.exists(src):
+            raise NotReplaced(f"{os.path.basename(src)} exists again (re-downloaded?)")
+        aside = orig + ".recast-undone" + os.path.splitext(final)[1]
+        os.replace(final, aside)  # same share: renames, no copying
+        try:
+            os.replace(orig, src)
+        except OSError:
+            os.replace(aside, final)
+            raise
+        h["restored"] = time.time()
+        self.touch()
+        self.save(force=True)
+        return f"restored {os.path.basename(src)} · the re-encode was moved to the trash"
 
     def measured(self, folder: str) -> dict[str, tuple[float, int]]:
         """preset → (output/source size ratio, files) from real results under this show/folder."""
@@ -263,7 +293,8 @@ class Engine:
     def saved_under(self, folder: str) -> tuple[int, int, int]:
         """(files, bytes before, bytes after) that recast replaced under this folder."""
         root = norm(folder)
-        hs = [h for h in self.history if norm(h["src"]).startswith(root + os.sep) and h.get("out_size")]
+        hs = [h for h in self.history if norm(h["src"]).startswith(root + os.sep) and h.get("out_size")
+              and not h.get("restored")]
         return len(hs), sum(h["src_size"] for h in hs), sum(h["out_size"] for h in hs)
 
     def last_used(self, path: str) -> dict | None:
@@ -650,7 +681,8 @@ class Engine:
             return
         j.stage, j.result, j.finished = ("kept" if keep_both else "replaced"), msg, time.time()
         j.add_log(msg)
-        self.history.append({"src": j.src, "final": j.final, "preset": j.preset, "settings": j.settings,
+        self.history.append({"src": j.src, "final": j.final, "orig": j.orig, "preset": j.preset,
+                             "settings": j.settings,
                              "src_size": j.info.get("size", 0), "out_size": j.out_size, "when": time.time()})
         if self.arr and self.cfg.rescan_after_replace:
             try:
@@ -724,7 +756,7 @@ class Engine:
                 os.replace(moved_to, src)
             _rm(tmp)
             raise
-        j.final = final
+        j.final, j.orig = final, moved_to
         if mode == "delete":
             if os.path.abspath(src) != os.path.abspath(final):
                 os.remove(src)

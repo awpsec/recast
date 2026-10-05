@@ -230,3 +230,21 @@ async def test_pause_all_holds_the_queue(home, library, tmp_path):
     await run_until(eng, lambda: j.frame > f)
     eng.cancel(j)
     await run_until(eng, lambda: j.id not in eng._tasks)
+
+
+async def test_restore_original(home, library, tmp_path):
+    cfg, eng, _ = make(home, library, tmp_path)
+    season = library / "TV" / "Black Clover (2017)" / "Season 01"
+    import shutil as _sh
+    src = season / "Black Clover - S01E009 1080p AV1.mkv"
+    _sh.copy(next(season.glob("*E001*")), src)
+    before = src.read_bytes()
+    j = await _encoded(eng, cfg, src)
+    eng.approve(j)
+    await run_until(eng, lambda: j.stage == "replaced")
+    new = season / "Black Clover - S01E009 1080p HEVC.mkv"
+    assert new.exists() and not src.exists() and str(new) in {h["final"] for h in eng.history}
+    eng.restore(str(new))
+    assert src.read_bytes() == before and not new.exists()
+    assert os.path.normcase(str(new)) not in eng.done_paths()        # eligible for encoding again
+    assert list((library / ".recast-trash").rglob("*.recast-undone.mkv"))

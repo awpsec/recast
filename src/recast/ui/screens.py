@@ -701,7 +701,8 @@ class HelpScreen(ModalScreen):
         t.add_column()
         for k, d in [("1-5", "switch tabs (or click them)"), ("↑ ↓ ← → / mouse", "browse the library"),
                      ("e", "encode the highlighted file, or a folder (try 1 file first, or all)"),
-                     ("/", "find a show / season / file in the library"), ("f", "toggle frame preview"),
+                     ("/", "find a show / season / file in the library"),
+                     ("u", "restore the original of a file recast replaced (while it's in the trash)"), ("f", "toggle frame preview"),
                      ("[  ]", "frame preview refresh rate"), ("space", "pause / resume everything"),
                      ("x / r / del", "cancel · retry failed · clear finished (Queue)"),
                      ("y / n / r", "approve / deny / retry in Approvals"),

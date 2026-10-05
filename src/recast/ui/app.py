@@ -1564,8 +1564,8 @@ class RecastApp(App):
             if enc.stage == "copying":
                 t.append(f"⇣ {enc.name[:22]} {enc.copied / max(1, enc.info.get('size', 1)) * 100:.0f}%", "#7dcfff")
             else:
-                t.append(f"{'❚❚' if enc.stage == 'paused' else '▶'} {enc.name[:22]} {enc.progress * 100:.0f}% "
-                         f"{enc.fps:.0f}fps", "#e0af68")
+                t.append(f"{'❚❚' if enc.stage == 'paused' else '▶'} {enc.name[:22]} "
+                         f"{enc.phase + ' ' if enc.phase else ''}{enc.progress * 100:.0f}% {enc.fps:.0f}fps", "#e0af68")
         self.query_one("#topbar", Static).update(t)
 
     def update_job_detail(self) -> None:
@@ -1580,7 +1580,7 @@ class RecastApp(App):
         idx = {"queued": -1, "copying": 0, "ready": 1, "encoding": 1, "paused": 1, "verifying": 2, "awaiting": 3,
                "to_replace": 3, "replacing": 3, "replaced": 4, "kept": 4, "discarded": 4, "skipped": -1,
                "cancelled": -1, "failed": -1}[j.stage]
-        names = ["Copy to scratch" if j.remote else "Local", "Encode", "Verify",
+        names = ["Copy to scratch" if j.remote else "Local", f"Encode {j.phase}".strip(), "Verify",
                  "Batch approval" if j.batch else "Approve → replace"]
         spin = "◐◓◑◒"[int(time.monotonic() * 4) % 4]
         p = Text()

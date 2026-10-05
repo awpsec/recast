@@ -74,6 +74,7 @@ QSV_PRESET = dict(zip(SPEEDS, ["veryfast", "veryfast", "veryfast", "faster", "fa
                                "slower", "veryslow"]))
 X26X_SPEED = dict(zip(SPEEDS, [3.3, 2.8, 2.2, 1.7, 1.4, 1.0, 0.52, 0.22, 0.1]))  # fps vs medium
 TEXT_SUBS = {"subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"}
+KEEP_LOSSY = {"ac3", "eac3", "aac", "mp3", "opus", "vorbis"}  # already small: re-encoding only loses quality
 MP4_BAD_AUDIO = {"truehd", "mlp", "dts", "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_bluray", "pcm_dvd", "wmav2",
                  "wmapro", "vorbis"}
 # mkvmerge statistics tags describe the *source* stream; on a re-encoded stream they're lies
@@ -86,6 +87,31 @@ def _clear_stats(spec: str) -> list[str]:
     for t in STAT_TAGS:
         out += [f"-metadata:{spec}", f"{t}=", f"-metadata:{spec}", f"{t}-eng="]
     return out
+
+
+# Quality words for a CRF number. Each codec's scale is different (x264/x265 0–51, SVT-AV1 0–63),
+# lower is always better here; hardware encoders get the number translated (see build_command).
+QUALITY_TIERS = {
+    "h264": [(17, "extreme"), (19, "very high"), (21, "high"), (24, "balanced"), (27, "low"), (99, "very low")],
+    "hevc": [(17, "extreme"), (19, "very high"), (22, "high"), (25, "balanced"), (28, "low"), (99, "very low")],
+    "av1": [(19, "extreme"), (24, "very high"), (29, "high"), (35, "balanced"), (41, "low"), (99, "very low")],
+}
+CRF_SCALE = {"h264": ("x264", 51), "hevc": ("x265", 51), "av1": ("SVT-AV1", 63)}
+# video bits per pixel per frame, roughly where each word starts (HEVC); H.264 needs ~1.5x, AV1 ~0.75x
+BPP_TIERS = [(0.020, "very low"), (0.034, "low"), (0.050, "balanced"), (0.085, "high"), (0.13, "very high"),
+             (9.0, "extreme")]
+QUALITY_STYLE = {"extreme": "bold #9ece6a", "very high": "bold #9ece6a", "high": "#9ece6a", "balanced": "#c0caf5",
+                 "low": "#e0af68", "very low": "bold #f7768e"}
+
+
+def crf_word(codec: str, crf: int) -> str:
+    return next(w for top, w in QUALITY_TIERS.get(codec, QUALITY_TIERS["hevc"]) if crf <= top)
+
+
+def bitrate_word(codec: str, kbps: int, width: int, height: int, fps: float) -> str:
+    bpp = kbps * 1000 / max(1, width * height * (fps or 24))
+    bpp /= {"h264": 1.5, "av1": 0.75}.get(codec, 1.0)
+    return next(w for top, w in BPP_TIERS if bpp < top)
 
 
 def enc_status(e: str, caps: dict[str, EncoderCap]) -> str:
@@ -132,24 +158,67 @@ def _sub_indices(s: EncodeSettings, m: "MediaInfo") -> list[int]:
     return idx
 
 
+def two_pass(s: EncodeSettings, enc: str) -> bool:
+    return s.two_pass and s.rate_mode == "bitrate" and s.codec != "copy" and enc in ("libx264", "libx265")
+
+
+def _eac3_plan(s: EncodeSettings, m: "MediaInfo", a_idx: list[int]) -> list[tuple[int, int | None]]:
+    """For audio=eac3_51: (output index, kbps to encode at, or None = copy as-is)."""
+    plan = []
+    for n, i in enumerate(a_idx):
+        t = m.audio[i]
+        ch = t.get("channels", 2)
+        keep = t.get("codec") in KEEP_LOSSY and ch <= 6 and not (s.container == "mp4" and t.get("codec") in MP4_BAD_AUDIO)
+        plan.append((n, None if keep else (640 if ch > 2 else 224)))
+    return plan
+
+
+def ten_bit(s: EncodeSettings, m: "MediaInfo | None" = None) -> bool:
+    """10-bit output? H.264 stays 8-bit (10-bit H.264 barely plays anywhere)."""
+    if s.codec in ("h264", "copy"):
+        return False
+    if s.bit_depth == "source":
+        return bool(m and any(x in m.pix_fmt for x in ("10", "12", "p010")))
+    return s.bit_depth == "10"
+
+
+def pix_fmt_name(enc: str, ten: bool) -> str:
+    """The pixel format ffmpeg is actually given for this encoder."""
+    if "vaapi" in enc:
+        return "p010" if ten else "nv12"
+    if is_hw(enc):
+        return "p010le" if ten else ("nv12" if "qsv" in enc else "yuv420p")
+    return "yuv420p10le" if ten else "yuv420p"
+
+
 def build_command(s: EncodeSettings, m: "MediaInfo", src: str, out: str, caps: dict[str, EncoderCap],
-                  preview: str | None = None, ffmpeg: str = "ffmpeg") -> list[list[str]]:
-    """ffmpeg argv, grouped for pretty display. Flatten with sum(groups, [])."""
+                  preview: str | None = None, ffmpeg: str = "ffmpeg", pass_num: int | None = None,
+                  passlog: str = "recast-pass") -> list[list[str]]:
+    """ffmpeg argv, grouped for pretty display. Flatten with sum(groups, []).
+
+    Two-pass: call with pass_num=1 (analysis only, null output) then pass_num=2; `passlog` is a bare
+    file name and the process must run with cwd = the folder it lives in (keeps Windows drive
+    colons out of -x265-params). pass_num=None shows the pass-2 command."""
     enc, _ = resolve_encoder(s, caps)
-    ten = s.bit_depth == "10" and s.codec != "h264"
+    ten = ten_bit(s, m)
+    tp = two_pass(s, enc)
+    if tp and pass_num is None:
+        pass_num = 2
+    first = tp and pass_num == 1
     g: list[list[str]] = [[ffmpeg, "-hide_banner", "-y", "-nostdin", "-loglevel", "warning"],
                           ["-progress", "pipe:1", "-nostats", "-stats_period", "0.5"]]
     if "vaapi" in enc:
         g.append(["-vaapi_device", "/dev/dri/renderD128"])
     g.append(["-i", src])
     maps = ["-map", "0:V:0"]
-    for i in _audio_indices(s, m):
-        maps += ["-map", f"0:a:{i}"]
-    for i in _sub_indices(s, m):
-        maps += ["-map", f"0:s:{i}"]
-    if s.container == "mkv":
-        maps += ["-map", "0:t?"]  # attachments (fonts for ASS subs)
-    maps += ["-map_metadata", "0", "-map_chapters", "0"]
+    if not first:
+        for i in _audio_indices(s, m):
+            maps += ["-map", f"0:a:{i}"]
+        for i in _sub_indices(s, m):
+            maps += ["-map", f"0:s:{i}"]
+        if s.container == "mkv":
+            maps += ["-map", "0:t?"]  # attachments (fonts for ASS subs)
+        maps += ["-map_metadata", "0", "-map_chapters", "0"]
     g.append(maps)
     v: list[str]
     if s.codec == "copy":
@@ -185,12 +254,9 @@ def build_command(s: EncodeSettings, m: "MediaInfo", src: str, out: str, caps: d
         if s.tune != "none" and enc in ("libx265", "libx264"):
             v += ["-tune", s.tune]
         if "vaapi" not in enc:
-            if is_hw(enc):
-                v += ["-pix_fmt", "p010le" if ten else ("nv12" if "qsv" in enc else "yuv420p")]
-            else:
-                v += ["-pix_fmt", "yuv420p10le" if ten else "yuv420p"]
-        if s.two_pass and s.rate_mode == "bitrate" and enc.startswith("lib"):
-            v += ["-pass", "2"]
+            v += ["-pix_fmt", pix_fmt_name(enc, ten)]
+        if tp and enc == "libx264":
+            v += ["-pass", str(pass_num), "-passlogfile", passlog]
     g.append(v)
     vf = []
     if s.codec != "copy":
@@ -217,8 +283,18 @@ def build_command(s: EncodeSettings, m: "MediaInfo", src: str, out: str, caps: d
                   "arib-std-b67" if m.hdr == "HLG" else "smpte2084", "-colorspace", "bt2020nc"])
         if enc == "libx265":
             x265.insert(0, "hdr10-opt=1:repeat-headers=1")
+    if tp and enc == "libx265":
+        x265 += [f"pass={pass_num}", f"stats={passlog}.log"]
     if x265:
         g.append(["-x265-params", ":".join(x265)])
+    if first:  # analysis pass: video only, thrown away
+        if extra:
+            g.append(extra)
+        g.append(["-f", "null", "-"])
+        if preview:
+            g.append(["-map", "0:V:0", "-vf", "fps=2,scale=640:-2", "-c:v", "mjpeg", "-q:v", "5",
+                      "-update", "1", "-atomic_writing", "1", "-f", "image2", preview])
+        return g
     a_idx = _audio_indices(s, m)
     if s.audio == "copy":
         a = ["-c:a", "copy"]
@@ -229,6 +305,13 @@ def build_command(s: EncodeSettings, m: "MediaInfo", src: str, out: str, caps: d
                     a += [f"-c:a:{n}", "eac3" if multi else "aac", f"-b:a:{n}", "640k" if multi else "256k"]
     elif s.audio == "aac_stereo":
         a = ["-c:a", "aac", "-ac", "2", "-b:a", "192k"]
+    elif s.audio == "eac3_51":
+        a = ["-c:a", "copy"]
+        for n, kbps in _eac3_plan(s, m, a_idx):
+            if kbps:
+                a += [f"-c:a:{n}", "eac3", f"-b:a:{n}", f"{kbps}k"]
+                if m.audio[a_idx[n]].get("channels", 2) > 6:
+                    a += [f"-ac:a:{n}", "6"]  # 7.1 → 5.1
     else:
         a = ["-c:a", "libopus", "-af", "aformat=channel_layouts=7.1|5.1|stereo|mono"]
         for n, i in enumerate(a_idx):
@@ -289,6 +372,8 @@ def estimate(s: EncodeSettings, m: "MediaInfo", caps: dict[str, EncoderCap]) -> 
         a = sum(m.audio[i].get("kbps", 192) for i in idx)
     elif s.audio == "aac_stereo":
         a = 192 * len(idx)
+    elif s.audio == "eac3_51":
+        a = sum(kbps or m.audio[idx[n]].get("kbps", 192) for n, kbps in _eac3_plan(s, m, idx))
     else:
         a = sum(min(8, m.audio[i].get("channels", 2)) * 64 for i in idx)
     return v, a
@@ -306,6 +391,8 @@ def est_fps(s: EncodeSettings, m: "MediaInfo", caps: dict[str, EncoderCap]) -> f
     enc, _ = resolve_encoder(s, caps)
     cap = caps.get(enc)
     fps = cap.fps if cap and cap.fps else 30.0
+    if two_pass(s, enc):
+        fps /= 1.8  # analysis pass is a bit quicker than the real one
     if enc in ("libx265", "libx264", "libsvtav1"):
         fps *= X26X_SPEED[s.speed]
     pixels = max(1, m.width * m.height)
@@ -324,6 +411,18 @@ def already_target(s: EncodeSettings, m: "MediaInfo", caps: dict[str, EncoderCap
 def default_presets() -> dict[str, tuple[str, EncodeSettings]]:
     S = EncodeSettings
     return {
+        "Anime HEVC · 1800k": (
+            "x265 at 1800 kb/s, animation tune, 10-bit, same resolution, audio/subs/fonts untouched. "
+            "Two-pass (Advanced) = best quality per byte at ~2x the time.",
+            S(codec="hevc", encoder="libx265", resolution="source", rate_mode="bitrate", bitrate=1800,
+              maxrate="3000k", bufsize="6000k", speed="medium", tune="animation", bit_depth="10",
+              audio="copy", subs="copy", extra="-x265-params aq-mode=3")),
+        "Live action HEVC · 3200k · 5.1": (
+            "x265 at 3200 kb/s, 10-bit, 1080p max (4K is scaled down, HDR10 kept). Audio: AC3/EAC3/AAC "
+            "kept as-is; TrueHD/DTS/FLAC/7.1 → EAC3 5.1 640k.",
+            S(codec="hevc", encoder="libx265", resolution="1080", rate_mode="bitrate", bitrate=3200,
+              maxrate="5500k", bufsize="11000k", speed="medium", tune="none", bit_depth="10",
+              audio="eac3_51", subs="copy", hdr=True)),
         "HEVC 1080p · 2000k": (
             "Same streams, HEVC at 2000 kb/s, 1080p max. Encoder: best one on this machine.",
             S(codec="hevc", resolution="1080", rate_mode="bitrate", bitrate=2000)),
@@ -460,6 +559,7 @@ SCHEMA: dict[str, FieldSpec] = {
                      _o((18, "visually lossless"), (20, "high"), (22, "balanced"), (24, "smaller"),
                         (28, "small"))),
     "audio": FieldSpec(str, "audio handling", _o(("copy", "keep tracks as-is"),
+                                                 ("eac3_51", "keep AC3/EAC3/AAC; lossless/7.1 → EAC3 5.1"),
                                                  ("aac_stereo", "AAC 2.0 192k (compat)"),
                                                  ("opus", "Opus, keeps channel count"))),
     "subs": FieldSpec(str, "subtitle handling", _o(("copy", "keep all"), ("forced", "forced only"),
@@ -476,7 +576,10 @@ SCHEMA: dict[str, FieldSpec] = {
     "tune": FieldSpec(str, "x264/x265 tuning", _o(("none", ""), ("animation", "anime/cartoons"),
                                                    ("grain", "keep film grain"), ("film", "live action"),
                                                    ("fastdecode", "weak playback devices"))),
-    "bit_depth": FieldSpec(str, "10-bit avoids banding (not for H.264)", _o(("10", "recommended"), ("8", "compat"))),
+    "bit_depth": FieldSpec(str, "pixel format: 10-bit (yuv420p10le) avoids banding; 8-bit (yuv420p) for old "
+                                "devices; H.264 is always 8-bit",
+                           _o(("10", "yuv420p10le · recommended"), ("8", "yuv420p · max compatibility"),
+                              ("source", "match the source"))),
     "maxrate": FieldSpec(str, "VBV peak bitrate cap", _o(("4M", ""), ("8M", ""), ("25M", "4K"), ("", "none"))),
     "bufsize": FieldSpec(str, "VBV buffer (usually 2x maxrate)", _o(("8M", ""), ("16M", ""), ("50M", "4K"),
                                                                     ("", "none"))),

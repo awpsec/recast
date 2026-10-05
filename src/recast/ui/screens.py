@@ -18,8 +18,9 @@ from textual.widgets import Button, Input, Label, Select, Static, Switch
 
 from .. import ffmpeg as ff
 from ..config import Config, EncoderCap, Root, default_scratch, is_network_path, machine_summary
-from ..encode import (CODEC_LABEL, ENCODERS, SPEEDS, EncodeSettings, already_target, build_command,
-                      enc_status, est_bytes, est_fps, quote, resolve_encoder)
+from ..encode import (CODEC_LABEL, CRF_SCALE, ENCODERS, QUALITY_STYLE, SPEEDS, EncodeSettings, already_target,
+                      bitrate_word, build_command, crf_word, enc_status, est_bytes, est_fps, pix_fmt_name, quote,
+                      resolve_encoder, ten_bit)
 from .frames import FrameView, grab_frame, side_by_side
 from .style import badge, fdur, fsize
 
@@ -209,6 +210,15 @@ class SetupScreen(ModalScreen):
 
 # ───────────────────────────── encode dialog ─────────────────────────────
 
+def pixfmt_options(codec: str, enc: str) -> list[tuple]:
+    if codec == "h264":
+        return [(f"{pix_fmt_name(enc, False)} · 8-bit (H.264)", "8"), ("— 10-bit n/a for H.264", "10"),
+                ("— same as source n/a", "source")]
+    return [(f"{pix_fmt_name(enc, True)} · 10-bit (less banding)", "10"),
+            (f"{pix_fmt_name(enc, False)} · 8-bit (old devices)", "8"),
+            ("same as source", "source")]
+
+
 def encoder_options(codec: str, caps: dict[str, EncoderCap]) -> list[tuple]:
     if codec == "copy":
         return [("copy", "copy")]
@@ -268,14 +278,18 @@ class EncodeDialog(ModalScreen):
                     yield sel("f-res", [("Same as source", "source"), ("2160p", "2160"), ("1080p", "1080"),
                                         ("720p", "720"), ("480p", "480")], s.resolution)
                     yield Label("Rate control", classes="lbl")
-                    yield sel("f-rate", [("Target bitrate", "bitrate"), ("Constant quality", "crf")], s.rate_mode)
+                    yield sel("f-rate", [("Target bitrate (size)", "bitrate"), ("Constant quality (CRF)", "crf")],
+                              s.rate_mode)
                     yield Label("Bitrate kb/s", classes="lbl")
                     yield Input(str(s.bitrate), id="f-bitrate", type="integer")
-                    yield Label("Audio", classes="lbl")
-                    yield sel("f-audio", [("Copy all tracks", "copy"), ("AAC stereo", "aac_stereo"),
-                                          ("Opus (keep channels)", "opus")], s.audio)
+                    yield Label("Pixel format", classes="lbl")
+                    yield sel("f-depth", pixfmt_options(s.codec, resolve_encoder(s, self.caps)[0]), s.bit_depth)
                     yield Label("Quality (CRF)", classes="lbl")
                     yield Input(str(s.crf), id="f-crf", type="integer")
+                    yield Label("Audio", classes="lbl")
+                    yield sel("f-audio", [("Copy all tracks", "copy"),
+                                          ("EAC3 5.1 (shrink lossless/7.1)", "eac3_51"), ("AAC stereo", "aac_stereo"),
+                                          ("Opus (keep channels)", "opus")], s.audio)
                     yield Label("Subtitles", classes="lbl")
                     yield sel("f-subs", [("Copy all", "copy"), ("Forced only", "forced"), ("Drop", "none")], s.subs)
                     yield Label("Container", classes="lbl")
@@ -301,8 +315,6 @@ class EncodeDialog(ModalScreen):
                         yield Label("Tune", classes="lbl")
                         yield sel("f-tune", [(p, p) for p in ["none", "animation", "grain", "film", "fastdecode"]],
                                   s.tune)
-                        yield Label("Bit depth", classes="lbl")
-                        yield sel("f-depth", [("10-bit", "10"), ("8-bit", "8")], s.bit_depth)
                         yield Label("Max rate", classes="lbl")
                         yield Input(s.maxrate, placeholder="e.g. 4M", id="f-maxrate")
                         yield Label("Buffer size", classes="lbl")
@@ -363,7 +375,7 @@ class EncodeDialog(ModalScreen):
             q(i).value = v
         for i, v in [("f-skip", s.skip_same), ("f-twopass", s.two_pass), ("f-hdr", s.hdr), ("f-deint", s.deinterlace)]:
             q(i).value = v
-        if s.extra or s.encoder != "auto" or s.tune != "none" or s.maxrate:
+        if s.extra or s.encoder != "auto" or s.tune != "none" or s.maxrate or s.two_pass:
             self.set_adv(True)
 
     def set_adv(self, on: bool) -> None:
@@ -378,8 +390,12 @@ class EncodeDialog(ModalScreen):
             s = self.read()
         except Exception:
             return
-        self.query_one("#f-bitrate").disabled = s.rate_mode != "bitrate" or s.codec == "copy"
-        self.query_one("#f-crf").disabled = s.rate_mode != "crf" or s.codec == "copy"
+        br, cr = self.query_one("#f-bitrate", Input), self.query_one("#f-crf", Input)
+        br.disabled = cr.disabled = s.codec == "copy"
+        # the field that isn't in use is dimmed, not disabled: clicking into it switches rate control
+        br.set_class(s.rate_mode != "bitrate", "inactive")
+        cr.set_class(s.rate_mode != "crf", "inactive")
+        problem = self._rate_hints(s)
         name = self.query_one("#f-preset").value
         st = self.query_one("#preset-state", Static)
         if name == "__custom__":
@@ -420,6 +436,8 @@ class EncodeDialog(ModalScreen):
         e.append(f" for {os.path.basename(m.path) if len(self.all_files) > 1 else 'this file'}\n          ")
         e.append(enc, "bold #7dcfff")
         e.append(f" on {self.cfg.machine.get('host', 'this machine')}" + (" (auto)" if note == "auto" else ""))
+        if s.codec != "copy":
+            e.append(f" · {pix_fmt_name(enc, ten_bit(s, m))}")
         e.append(f" · ~{fps:.0f} fps · ≈{fdur(m.frames / fps if m.frames else m.duration)} per file")
         if note and note != "auto":
             e.append(f"\n          ⚠ {note}", "#e0af68")
@@ -456,9 +474,12 @@ class EncodeDialog(ModalScreen):
             try:
                 btn = self.query_one("#go-all", Button)
                 btn.label = f"⏵⏵ Encode {len(todo)} file{'s' * (len(todo) != 1)}"
-                btn.disabled = not todo
+                btn.disabled = not todo or bool(problem)
             except Exception:
                 pass
+        if problem:
+            e.append(f"\n          ✗ {problem}", "bold #f7768e")
+        self.query_one("#go-preview", Button).disabled = bool(problem)
         self.query_one("#est", Static).update(e)
 
     @property
@@ -472,9 +493,49 @@ class EncodeDialog(ModalScreen):
             enc.set_options(encoder_options(event.value, self.caps))
             valid = ["copy"] if event.value == "copy" else ["auto", *ENCODERS[event.value]]
             enc.value = cur if cur in valid else valid[0]
+        if event.select.id in ("f-codec", "f-encoder"):
+            try:
+                s = self.read()
+                pf = self.query_one("#f-depth", Select)
+                cur = pf.value
+                pf.set_options(pixfmt_options(s.codec, resolve_encoder(s, self.caps)[0]))
+                pf.value = "8" if s.codec == "h264" else cur
+            except Exception:
+                pass
         if event.select.id == "f-preset" and event.value != "__custom__" and getattr(self, "_ready", False):
             self.load(self.presets[event.value][1])  # only when the user picks one, never during mount
         self.update_preview()
+
+    def _rate_hints(self, s: EncodeSettings) -> str:
+        """Quality words on the bitrate / CRF boxes; returns a blocking problem, if any."""
+        br, cr = self.query_one("#f-bitrate", Input), self.query_one("#f-crf", Input)
+        m = self.sample
+        h = m.height if s.resolution == "source" else min(int(s.resolution), m.height or int(s.resolution))
+        w = int((m.width or 1920) * h / max(1, m.height or h))
+        codec = s.codec if s.codec != "copy" else "hevc"
+        name, top = CRF_SCALE.get(codec, ("x265", 51))
+        problem = ""
+        if s.rate_mode == "crf" and not 0 <= s.crf <= top:
+            problem = f"CRF must be 0–{top} for {name}"
+        if s.rate_mode == "bitrate" and not 100 <= s.bitrate <= 200000:
+            problem = "bitrate should be 100–200000 kb/s"
+        cw, bw = crf_word(codec, s.crf), bitrate_word(codec, s.bitrate, w, h, m.fps)
+        cr.border_title = f"{cw}" if 0 <= s.crf <= top else f"0–{top}!"
+        cr.border_subtitle = f"{name} 0–{top} · lower = better"
+        br.border_title = f"{bw} @{h}p"
+        br.border_subtitle = ""
+        cr.styles.border_title_color = QUALITY_STYLE[cw].split()[-1] if 0 <= s.crf <= top else "#f7768e"
+        br.styles.border_title_color = QUALITY_STYLE[bw].split()[-1]
+        return problem
+
+    def on_descendant_focus(self, event) -> None:
+        """Clicking into the inactive Bitrate/CRF box switches rate control to it."""
+        wid = getattr(event.widget, "id", "")
+        rate = self.query_one("#f-rate", Select)
+        if wid == "f-crf" and rate.value != "crf":
+            rate.value = "crf"
+        elif wid == "f-bitrate" and rate.value != "bitrate":
+            rate.value = "bitrate"
 
     def on_input_changed(self, event: Input.Changed) -> None:
         self.update_preview()

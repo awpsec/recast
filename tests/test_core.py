@@ -145,3 +145,37 @@ def test_interlaced_detected():
     assert parse("/a.mkv", base).interlaced
     base["streams"][0]["field_order"] = "progressive"
     assert not parse("/a.mkv", base).interlaced
+
+
+def test_eac3_51_keeps_lossy_and_shrinks_lossless():
+    m = media(audio=[{"lang": "eng", "codec": "truehd", "channels": 8, "kbps": 4000},
+                     {"lang": "eng", "codec": "ac3", "channels": 6, "kbps": 640},
+                     {"lang": "jpn", "codec": "flac", "channels": 2, "kbps": 900}])
+    argv = flat(build_command(EncodeSettings(audio="eac3_51"), m, "i", "o.mkv", MAC))
+    assert argv[argv.index("-c:a:0") + 1] == "eac3" and argv[argv.index("-ac:a:0") + 1] == "6"
+    assert "-c:a:1" not in argv                                  # AC3 5.1 copied untouched
+    assert argv[argv.index("-b:a:2") + 1] == "224k"              # stereo FLAC → EAC3 224k
+    from recast.encode import estimate
+    assert estimate(EncodeSettings(audio="eac3_51"), m, MAC)[1] == 640 + 640 + 224
+
+
+def test_two_pass_commands():
+    s = EncodeSettings(encoder="libx265", rate_mode="bitrate", bitrate=1800, two_pass=True, extra="-x265-params aq-mode=3")
+    p1 = flat(build_command(s, media(), "in.mkv", "out.mkv", MAC, pass_num=1, passlog="7-pass"))
+    p2 = flat(build_command(s, media(), "in.mkv", "out.mkv", MAC, pass_num=2, passlog="7-pass"))
+    assert p1[-3:] == ["-f", "null", "-"] and "0:a:0" not in p1 and "out.mkv" not in p1
+    assert p1[p1.index("-x265-params") + 1] == "aq-mode=3:pass=1:stats=7-pass.log"
+    assert p2[p2.index("-x265-params") + 1] == "aq-mode=3:pass=2:stats=7-pass.log" and p2[-1] == "out.mkv"
+    x264 = flat(build_command(EncodeSettings(codec="h264", encoder="libx264", two_pass=True), media(), "i", "o", MAC,
+                              pass_num=1, passlog="7-pass"))
+    assert x264[x264.index("-pass") + 1] == "1" and x264[x264.index("-passlogfile") + 1] == "7-pass"
+    crf = flat(build_command(EncodeSettings(encoder="libx265", rate_mode="crf", two_pass=True), media(), "i", "o", MAC))
+    assert "pass=" not in " ".join(crf)                          # two-pass only means something for bitrate
+
+
+def test_new_presets_exist():
+    from recast.encode import default_presets
+    p = default_presets()
+    anime, live = p["Anime HEVC · 1800k"][1], p["Live action HEVC · 3200k · 5.1"][1]
+    assert (anime.bitrate, anime.resolution, anime.audio, anime.encoder) == (1800, "source", "copy", "libx265")
+    assert (live.bitrate, live.resolution, live.audio) == (3200, "1080", "eac3_51")

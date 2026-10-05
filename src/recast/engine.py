@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Callable
 
 from .config import Config, config_dir
-from .encode import CODEC_LABEL, EncodeSettings, _audio_indices, _sub_indices, build_command, est_bytes
+from .encode import (CODEC_LABEL, EncodeSettings, _audio_indices, _sub_indices, build_command, est_bytes,
+                     resolve_encoder, two_pass)
 from .ffmpeg import NO_WINDOW, parse_progress, run
 from .probe import MediaInfo, probe_now
 
@@ -98,6 +99,7 @@ class Job:
     out_info: dict = field(default_factory=dict)
     final: str = ""  # path of the new file in the library after replace
     orig: str = ""   # where the original went (trash / .orig), for undo
+    phase: str = ""  # "pass 1/2" during two-pass analysis
     log: list = field(default_factory=list)
     spark: list = field(default_factory=list)
 
@@ -525,24 +527,55 @@ class Engine:
         stem = os.path.splitext(j.name)[0]
         j.out = self.scratch("out", f"{j.id}-{stem}.{s.container}")
         j.preview_jpg = self.scratch("preview", f"{j.id}.jpg")
-        argv = sum(build_command(s, m, j.work_src or j.src, j.out, self.cfg.encoders, j.preview_jpg,
-                                 self.cfg.ffmpeg), [])
-        j.stage, j.started, j.frame, j.out_size, j.out_time, j.spark = "encoding", time.time(), 0, 0, 0.0, []
-        j.add_log("$ " + " ".join(argv))
+        enc, _ = resolve_encoder(s, self.cfg.encoders)
+        passes = [1, 2] if two_pass(s, enc) else [None]
+        passdir = os.path.dirname(self.scratch("pass", "x"))
+        passlog = f"{j.id}-pass"
+        j.stage, j.started, j.spark = "encoding", time.time(), []
         self.touch()
+        for n in passes:
+            j.phase = f"pass {n}/2" if n else ""
+            j.frame, j.out_size, j.out_time = 0, 0, 0.0
+            argv = sum(build_command(s, m, j.work_src or j.src, j.out, self.cfg.encoders, j.preview_jpg,
+                                     self.cfg.ffmpeg, pass_num=n, passlog=passlog), [])
+            j.add_log(("$ " if not n else f"$ [pass {n}/2] ") + " ".join(argv))
+            rc, err_tail = await self._run_ffmpeg(j, argv, cwd=passdir if n else None)
+            if j.id in self._cancel:
+                self._cancel.discard(j.id)
+                self._cleanup(j)
+                _rm_glob(passdir, passlog)
+                return
+            if rc != 0:
+                _rm_glob(passdir, passlog)
+                msg = next((l for l in reversed(err_tail) if "error" in l.lower() or "invalid" in l.lower()),
+                           err_tail[-1] if err_tail else f"ffmpeg exited {rc}")
+                return self._fail(j, msg[:200])
+        _rm_glob(passdir, passlog)
+        j.phase = ""
+        j.out_size = os.path.getsize(j.out)
+        j.stage, j.finished = "verifying", time.time()
+        j.add_log("verifying output…")
+        self.touch()
+        await self._verify(j)
+
+    async def _run_ffmpeg(self, j: Job, argv: list[str], cwd: str | None = None) -> tuple[int, list[str]]:
+        """Run one ffmpeg, streaming -progress into the job. Returns (exit code, last stderr lines)."""
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE, creationflags=NO_WINDOW)
+                stderr=asyncio.subprocess.PIPE, creationflags=NO_WINDOW, cwd=cwd)
         except OSError as e:
-            return self._fail(j, f"couldn't start ffmpeg: {e}")
+            return 1, [f"couldn't start ffmpeg: {e}"]
         self._procs[j.id] = proc
+        if self.hold:  # paused while we were between passes / starting
+            self._signal(proc.pid, cont=False)
+            j.stage = "paused"
         err_tail: list[str] = []
 
         async def read_err():
             async for raw in proc.stderr:
                 line = raw.decode(errors="replace").rstrip()
-                if line and not line.startswith(("Svt[info]", "Svt[warn]")):
+                if line and not line.startswith(("Svt[info]", "Svt[warn]", "x265 [info]")):
                     err_tail.append(line)
                     del err_tail[:-40]
                     j.add_log(line)
@@ -556,7 +589,7 @@ class Engine:
                     p = parse_progress(block)
                     j.frame, j.fps, j.speed, j.out_time = p["frame"], p["fps"], p["speed"], p["time"]
                     j.out_size = p["size"] or j.out_size
-                    if p["kbps"]:
+                    if p["kbps"] and j.phase != "pass 1/2":
                         j.kbps = p["kbps"]
                         j.spark.append(p["kbps"])
                         del j.spark[:-240]
@@ -565,19 +598,7 @@ class Engine:
         await asyncio.gather(read_err(), read_progress())
         rc = await proc.wait()
         self._procs.pop(j.id, None)
-        if j.id in self._cancel:
-            self._cancel.discard(j.id)
-            self._cleanup(j)
-            return
-        if rc != 0:
-            msg = next((l for l in reversed(err_tail) if "error" in l.lower() or "invalid" in l.lower()),
-                       err_tail[-1] if err_tail else f"ffmpeg exited {rc}")
-            return self._fail(j, msg[:200])
-        j.out_size = os.path.getsize(j.out)
-        j.stage, j.finished = "verifying", time.time()
-        j.add_log("verifying output…")
-        self.touch()
-        await self._verify(j)
+        return rc, err_tail
 
     # ── stage: verify ──
     async def _verify(self, j: Job) -> None:
@@ -924,6 +945,15 @@ def _find_original(src: str) -> str:
             break
         a = parent
     return ""
+
+
+def _rm_glob(folder: str, prefix: str) -> None:
+    try:
+        for e in os.scandir(folder):
+            if e.name.startswith(prefix):
+                _rm(e.path)
+    except OSError:
+        pass
 
 
 def _free(path: str) -> int | None:

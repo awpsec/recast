@@ -248,3 +248,27 @@ async def test_restore_original(home, library, tmp_path):
     assert src.read_bytes() == before and not new.exists()
     assert os.path.normcase(str(new)) not in eng.done_paths()        # eligible for encoding again
     assert list((library / ".recast-trash").rglob("*.recast-undone.mkv"))
+
+
+async def test_two_pass_and_eac3_end_to_end(home, tmp_path):
+    import make_library
+    import subprocess as sp
+    lib = tmp_path / "lib"
+    src = lib / "Movies" / "Film (2020)" / "Film (2020).mkv"
+    src.parent.mkdir(parents=True)
+    sp.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=24:duration=6",
+            "-f", "lavfi", "-i", "sine=frequency=300:duration=6", "-map", "0:v", "-map", "1:a",
+            "-af", "aformat=channel_layouts=7.1", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16",
+            "-c:a", "flac", str(src)], check=True)
+    cfg = Config(roots=[Root("L", str(lib), remote=True)], scratch=str(tmp_path / "scratch"), ffmpeg="ffmpeg",
+                 ffprobe="ffprobe", encoders=CAPS)
+    eng = Engine(cfg)
+    s = EncodeSettings(encoder="libx265", speed="ultrafast", rate_mode="bitrate", bitrate=800, two_pass=True,
+                       audio="eac3_51")
+    j = eng.add_single(probe_now("ffprobe", str(src)), cfg.roots[0], s, "t")
+    await run_until(eng, lambda: j.stage in ("awaiting", "failed"))
+    assert j.stage == "awaiting", (j.error, j.log[-4:])
+    assert any("[pass 1/2]" in l for l in j.log) and any("pass=2" in l for l in j.log)
+    a = j.out_info["audio"][0]
+    assert a["codec"] == "eac3" and a["channels"] == 6
+    assert not list(Path(cfg.scratch, "pass").glob(f"{j.id}-pass*"))   # stats files cleaned up

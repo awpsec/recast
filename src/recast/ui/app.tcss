@@ -87,3 +87,7 @@ PresetEditor .text-area--suggestion { color: #565f89; text-style: italic; }
 #appr-rest-btns { height: 3; }
 #appr-rest-btns Button { margin-right: 1; }
 #appr-rest-hint { margin: 1 0 0 0; }
+Input.inactive { color: $text-disabled; border: tall $panel; }
+Input.inactive:focus { color: $text; }
+#enc-box Input { border-title-align: right; border-subtitle-align: right; }
+.grid4 { grid-rows: 4; }

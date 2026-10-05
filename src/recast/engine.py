@@ -248,19 +248,24 @@ class Engine:
             if j.batch and over:
                 self.on_event("budget", j)
             elif not (live and not self.cfg.prefetch):
-                self._start(j, self._copy(j))
+                self._start(j, "copying", self._copy)
         if not live and ready:
-            self._start(ready[0], self._encode(ready[0]))
+            self._start(ready[0], "encoding", self._encode)
         if not any(j.stage == "replacing" for j in jobs):
             nxt = next((j for j in sorted(jobs, key=lambda j: j.id) if j.stage == "to_replace"), None)
             if nxt:
-                self._start(nxt, self._replace(nxt))
+                self._start(nxt, "replacing", self._replace)
         self.save()
 
-    def _start(self, j: Job, coro) -> None:
-        t = asyncio.ensure_future(coro)
+    def _start(self, j: Job, stage: str, fn) -> None:
+        """Claim the stage *now* (so the next tick can't start it again), then run it."""
+        running = self._tasks.get(j.id)
+        if running and not running.done():
+            return
+        j.stage = stage
+        t = asyncio.ensure_future(fn(j))
         self._tasks[j.id] = t
-        t.add_done_callback(lambda _t, jid=j.id: self._tasks.pop(jid, None))
+        t.add_done_callback(lambda _t, jid=j.id: self._tasks.pop(jid, None) if self._tasks.get(jid) is _t else None)
 
     def scratch(self, *parts: str) -> str:
         p = Path(self.cfg.scratch, *parts)
@@ -367,6 +372,8 @@ class Engine:
     # ── stage: verify ──
     async def _verify(self, j: Job) -> None:
         m, s = j.media, j.s
+        if j.stage != "verifying":
+            return
         try:
             out = await asyncio.to_thread(probe_now, self.cfg.ffprobe, j.out)
         except Exception as e:  # noqa: BLE001
@@ -407,6 +414,8 @@ class Engine:
         return ""
 
     def _after(self, j: Job) -> None:
+        if j.stage != "verifying":
+            return  # cancelled / denied meanwhile
         b = self.batch_of(j)
         s = j.s
         if s.after == "keep":

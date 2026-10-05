@@ -35,7 +35,10 @@ def episode(path: Path, codec: list[str], size="1280x720", rate="24000/1001", se
     else:
         args += ["-c:a", "libopus", "-b:a", "96k", "-metadata:s:a:0", "language=jpn", "-metadata:s:a:1",
                  "language=eng"]
-    ff(*args, *codec, str(path))
+    # mimic mkvmerge statistics tags, which recast must not carry onto re-encoded streams
+    stats = ["-metadata:s:v:0", "BPS=99999999", "-metadata:s:v:0", "NUMBER_OF_BYTES=123456789",
+             "-metadata:s:v:0", "language=eng"] if path.suffix == ".mkv" else []
+    ff(*args, *codec, *stats, str(path))
     srt.unlink()
 
 

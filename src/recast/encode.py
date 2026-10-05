@@ -74,6 +74,16 @@ QSV_PRESET = dict(zip(SPEEDS, ["veryfast", "veryfast", "veryfast", "faster", "fa
                                "slower", "veryslow"]))
 X26X_SPEED = dict(zip(SPEEDS, [3.3, 2.8, 2.2, 1.7, 1.4, 1.0, 0.52, 0.22, 0.1]))  # fps vs medium
 TEXT_SUBS = {"subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"}
+# mkvmerge statistics tags describe the *source* stream; on a re-encoded stream they're lies
+STAT_TAGS = ["BPS", "NUMBER_OF_FRAMES", "NUMBER_OF_BYTES", "_STATISTICS_WRITING_APP",
+             "_STATISTICS_WRITING_DATE_UTC", "_STATISTICS_TAGS"]
+
+
+def _clear_stats(spec: str) -> list[str]:
+    out: list[str] = []
+    for t in STAT_TAGS:
+        out += [f"-metadata:{spec}", f"{t}=", f"-metadata:{spec}", f"{t}-eng="]
+    return out
 
 
 def enc_status(e: str, caps: dict[str, EncoderCap]) -> str:
@@ -223,6 +233,9 @@ def build_command(s: EncodeSettings, m: "MediaInfo", src: str, out: str, caps: d
     if s.container == "mkv":
         a += ["-c:t", "copy"]
     g.append(a)
+    stale = (_clear_stats("s:v:0") if s.codec != "copy" else []) + (_clear_stats("s:a") if s.audio != "copy" else [])
+    if stale:
+        g.append(stale)
     if extra:
         g.append(extra)
     g.append(["-max_muxing_queue_size", "4096", out])

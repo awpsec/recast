@@ -39,6 +39,11 @@ async def test_preview_encode_approve_replace(home, library, tmp_path):
     assert not j.flag, j.flag
     assert ("finished", j) in events
     assert j.out_info["codec"] == "HEVC" and len(j.out_info["audio"]) == 2 and len(j.out_info["subs"]) == 1
+    assert j.out_info["vkbps"] < 5000, j.out_info["vkbps"]  # not the source's stale BPS=99999999 tag
+    import json as _json, subprocess as _sp
+    tags = _json.loads(_sp.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream_tags",
+                                "-of", "json", j.out], capture_output=True, text=True).stdout)["streams"][0]["tags"]
+    assert "BPS" not in tags and "NUMBER_OF_BYTES" not in tags and tags.get("language") == "eng", tags
     assert j.frame > 150 and j.out_size > 0
     assert os.path.exists(j.out) and "hevc_videotoolbox" in " ".join(j.log)
     eng.approve(j)
@@ -57,7 +62,7 @@ async def test_batch_ask_once_then_auto(home, library, tmp_path):
     cfg, eng, events = make(home, library, tmp_path)
     season = library / "TV" / "Black Clover (2017)" / "Season 01"
     files = [probe_now("ffprobe", str(p)) for p in sorted(season.glob("*.mkv"))]
-    s = EncodeSettings(codec="hevc", encoder="libx265", speed="ultrafast", rate_mode="crf", crf=30)
+    s = EncodeSettings(codec="hevc", encoder="libx265", speed="ultrafast", rate_mode="crf", crf=38)
     b = eng.add_batch(str(season), files, cfg.roots[0], s, "batch", lambda m: already_target(s, m, CAPS))
     await run_until(eng, lambda: len(eng.batch_jobs(b, "awaiting")) >= 1)
     assert b in eng.inbox() and any(k == "batch_first" for k, _ in events)

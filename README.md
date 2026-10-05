@@ -4,9 +4,16 @@ A terminal app for re-encoding a Plex / Sonarr / Radarr library with ffmpeg, saf
 encode one file or a whole season, watch it happen, then approve before anything in
 your library changes.
 
-- **Browse the library** (arrows, mouse, `/` to find) and see codec, bitrate, tracks and
-  Sonarr/Radarr info for any file or folder, plus what a preset would save.
-- **Encode a file, or a folder** (try one file first, then "encode all").
+- **Browse the library** (arrows, mouse, `/` to find; it reopens where you left off) and see
+  codec, bitrate, tracks and Sonarr/Radarr info for any file or folder.
+- **See what every preset would do** to that file, season or show: files, size after,
+  % saved. Once you've encoded something from a show, the numbers are *measured* from
+  your real results instead of estimated.
+- **Encode a file, or a folder.** The flow that works best: encode one episode, look at it,
+  then press **"Approve + rest of season / whole show"**. Same settings, one approval for
+  the batch, already-done episodes skipped. recast remembers what you used per show.
+- **Library marks every file**: ✓ re-encoded by recast, ● queued/encoding, ⚑ waiting
+  for you.
 - **Network shares are copied to a local scratch folder first**; only one file is
   prefetched ahead, so the NAS isn't hammered.
 - **Live progress**: fps, speed, size so far vs projected, bitrate graph, ETA, and
@@ -16,7 +23,15 @@ your library changes.
   A whole folder is **one approval**; approve early and the rest replace as they pass.
 - **Replacing is careful**: the new file is copied next to the original as a
   temp file, the original moves to `.recast-trash/<date>/` (purged after N days),
-  then the temp file is renamed into place. Sonarr/Radarr get a rescan.
+  then the temp file is renamed into place. `…1080p AV1.mkv` becomes `…1080p HEVC.mkv`.
+  Sonarr/Radarr get a rescan. It refuses (and leaves everything alone) if the original
+  changed since it was encoded, a file with the new name already exists, or there's
+  no room.
+- **Undo**: press `u` on any file recast replaced to put the original back while it's
+  still in the trash.
+- **Long runs are safe to leave**: if the NAS drops off, jobs wait instead of failing;
+  `space` pauses everything; the computer is kept awake while jobs run; you get a
+  desktop notification when a batch is done or something needs you.
 - **Hardware detection on first launch**: every encoder gets a 2-second test encode,
   so `auto` picks what really works on *this* machine (NVENC, VideoToolbox, Quick
   Sync, VA-API, or x265/x264/SVT-AV1).
@@ -69,9 +84,12 @@ Re-run detection any time from Settings or with `recast --setup`.
 | `1`–`5` | Library · Queue · Approvals · Presets · Settings (or click) |
 | `/` | find a show / season / file |
 | `e` | encode the highlighted file or folder |
+| `u` | restore the original of a file recast replaced |
 | `f`, `[` `]` | frame preview on/off, refresh rate |
-| `space`, `x` | pause/resume the active encode, cancel a job |
+| `space` | pause / resume everything |
+| `x` `r` `del` | in Queue: cancel a job, retry a failed one, clear finished |
 | `y` `n` `r` `c` | approve, deny, retry with different settings, compare frames |
+| `a` `s` | in the approval prompt: approve + rest of season / whole show |
 | `ctrl+a` | advanced settings in the encode dialog |
 | `tab` `↑↓` `ctrl+space` | accept / choose / open suggestions in the preset editor |
 | `ctrl+s` | save preset |

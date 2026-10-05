@@ -135,3 +135,13 @@ def test_stale_bps_tag_is_not_trusted():
                         {"codec_type": "audio", "codec_name": "ac3", "channels": 6, "tags": {"BPS": "448000"}}]}
     m = parse("/x.mkv", data)
     assert 2800 < m.vkbps < 3200, m.vkbps   # size/duration says ~3.0 Mb/s video, not the tag's 5.7
+
+
+def test_interlaced_detected():
+    from recast.probe import parse
+    base = {"format": {"size": "1000000", "duration": "10"},
+            "streams": [{"codec_type": "video", "codec_name": "mpeg2video", "width": 720, "height": 480,
+                         "avg_frame_rate": "30000/1001", "field_order": "tt"}]}
+    assert parse("/a.mkv", base).interlaced
+    base["streams"][0]["field_order"] = "progressive"
+    assert not parse("/a.mkv", base).interlaced

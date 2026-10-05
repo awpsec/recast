@@ -33,6 +33,7 @@ class MediaInfo:
     vkbps: int = 0
     pix_fmt: str = ""
     hdr: str = ""  # "", HDR10, HLG, Dolby Vision
+    interlaced: bool = False
     audio: list = field(default_factory=list)  # dicts: lang codec channels layout kbps title default
     subs: list = field(default_factory=list)   # dicts: lang codec forced title
     error: str = ""
@@ -89,6 +90,7 @@ def parse(path: str, data: dict) -> MediaInfo:
         m.width, m.height = int(v.get("width", 0)), int(v.get("height", 0))
         m.fps = round(_rate(v.get("avg_frame_rate", "")) or _rate(v.get("r_frame_rate", "")), 3)
         m.pix_fmt = v.get("pix_fmt", "")
+        m.interlaced = v.get("field_order", "progressive") in ("tt", "bb", "tb", "bt")
         m.vkbps = int(int(v.get("bit_rate", 0) or 0) / 1000) or _tag_int(v, "BPS") // 1000
         m.frames = int(v.get("nb_frames", 0) or 0) or _tag_int(v, "NUMBER_OF_FRAMES")
         trc = v.get("color_transfer", "")
@@ -135,13 +137,13 @@ class ProbeCache:
         self._lock = threading.Lock()
         self._dirty = False
         try:
-            self._data: dict = {k: v for k, v in json.loads(self.file.read_text()).items() if k.startswith("v2|")}
+            self._data: dict = {k: v for k, v in json.loads(self.file.read_text()).items() if k.startswith("v3|")}
         except (OSError, ValueError):
             self._data = {}
 
     def _key(self, path: str) -> str:
         st = os.stat(path)
-        return f"v2|{path}|{st.st_size}|{int(st.st_mtime)}"  # bump vN when parse() changes
+        return f"v3|{path}|{st.st_size}|{int(st.st_mtime)}"  # bump vN when parse() changes
 
     def cached(self, path: str) -> MediaInfo | None:
         try:

@@ -143,6 +143,7 @@ class RecastApp(App):
         self._rows: dict[int, tuple] = {}
         self._inbox_sig: tuple = ()
         self._copy_rate: dict[int, tuple[float, int, float]] = {}
+        self._tree_status: dict[str, str] = {}
         self._ticks = 0
 
     # ── layout ──
@@ -408,10 +409,13 @@ class RecastApp(App):
             node.add_leaf(self.file_label(p, size, cached.get(p)), data=Node("file", p, d.root, size=size))
 
     def file_label(self, path: str, size: int, m: MediaInfo | None) -> Text:
+        key = norm(path)
+        st = self._tree_status.get(key, "")
+        mark = {"done": ("✓ ", "#9ece6a"), "busy": ("● ", "#e0af68"), "wait": ("⚑ ", "#bb9af7")}.get(st, ("  ", ""))
         name = os.path.basename(path)
         if len(name) > 42:  # keep the end: that's where SxxEyy and quality live
             name = name[:16] + "…" + name[-25:]
-        t = Text(name.ljust(43))
+        t = Text.assemble(mark, name.ljust(43))
         if m:
             t.append_text(badge(m.codec))
             t.append(f" {m.res:>5}", "dim")
@@ -524,7 +528,8 @@ class RecastApp(App):
                                          f"{m.vkbps:,} kb/s" + (f" · {m.hdr}" if m.hdr else "")))
         g.add_row("Audio", "  ".join(f"{i + 1} {m.audio_label(a)}" for i, a in enumerate(m.audio)) or "none")
         g.add_row("Subs", "  ".join(f"{i + 1} {m.sub_label(s)}" for i, s in enumerate(m.subs)) or "none")
-        g.add_row("Length", f"{fdur(m.duration)}  ·  {m.frames:,} frames")
+        g.add_row("Length", f"{fdur(m.duration)}  ·  {m.frames:,} frames" +
+                  ("  ·  interlaced (use a preset with Deinterlace on)" if m.interlaced else ""))
         g.add_row("Size", fsize(m.size))
         g.add_row("Where", Text(d.path, style="#9ece6a"))
         g.add_row("Access", "network share → copied to scratch first" if d.root.remote else "local disk — read in place")
@@ -571,6 +576,13 @@ class RecastApp(App):
                 out, how = sum(est_bytes(s, m, caps) for m in todo), "estimate"
             rows.append((out / src - 1, name, s, len(todo), src, out, how))
         rows.sort(key=lambda r: r[0])
+        idle = [r for r in rows if r[0] == 9.0]
+        rows = [r for r in rows if r[0] != 9.0]
+        if not rows:
+            why = idle[0][6] if idle else ""
+            return Text(("✓ Nothing left to gain here — " + ("all done by recast" if "done" in why else
+                                                               "every file is already in each preset's codec")),
+                        style="#9ece6a")
         t = Table(box=None, padding=(0, 1), header_style="bold dim", title_justify="left",
                   title=Text("What each preset would do", style="bold"), show_edge=False, expand=False)
         one_line = {"no_wrap": True, "overflow": "ellipsis"}
@@ -583,9 +595,6 @@ class RecastApp(App):
         for pct, name, s, n, src, out, how in rows:
             mark = Text.assemble(("★" if name == self.cfg.default_preset else " ", "#e0af68"),
                                  ("◆" if name == last_name or last and name == last["preset"] else " ", "#bb9af7"))
-            if pct == 9.0:
-                t.add_row(mark, Text(name, style="dim"), "", "0", "—", Text("—", style="dim"), how)
-                continue
             col = "bold #9ece6a" if pct <= -0.10 else "#e0af68" if pct < 0 else "bold #f7768e"
             t.add_row(mark, Text(name, style="bold" if best and name == best[1] else ""),
                       resolve_encoder(s, caps)[0].replace("_videotoolbox", "_vt"), str(n), f"≈{fsize(out)}",
@@ -600,7 +609,10 @@ class RecastApp(App):
                 summary.append("   ")
         legend = Text("★ default  ◆ last used here  · measured = from files you've actually encoded in this show",
                       style="dim")
-        return Group(t, summary, legend) if summary else Group(t, legend)
+        parts = [t] + ([summary] if summary else [])
+        if idle:
+            parts.append(Text("nothing to gain from: " + ", ".join(r[1] for r in idle), style="dim"))
+        return Group(*parts, legend)
 
     def folder_details(self, d: Node, files, rec, probed: bool, progress=None, is_root=False) -> Group:
         parts = [Text(os.path.basename(d.path.rstrip("/\\")) or d.path, style="bold #c0caf5"),
@@ -635,7 +647,9 @@ class RecastApp(App):
             busy = sum(1 for p, _ in files if norm(p) in self.engine.busy_paths())
             extra = []
             if n_done:
-                extra.append(f"✓ {n_done} already re-encoded by recast")
+                k, before, after = self.engine.saved_under(d.path)
+                extra.append(f"✓ {n_done} re-encoded by recast" +
+                             (f" · saved {fsize(before - after)} ({fsize(before)} → {fsize(after)})" if k else ""))
             if busy:
                 extra.append(f"● {busy} in the queue / awaiting approval")
             if extra:
@@ -651,6 +665,11 @@ class RecastApp(App):
 
     # ── encode flow ──
     def action_encode(self) -> None:
+        if self.query_one("#tabs", TabbedContent).active != "tab-library":
+            self.action_tab("tab-library")
+            self.query_one("#lib-tree").focus()
+            self.notify("Pick a file, season or show, then press e.", timeout=3)
+            return
         d = self.current_node()
         if d:
             self.start_encode(d.path, d.kind == "dir")
@@ -1016,6 +1035,7 @@ class RecastApp(App):
             d.update(Text("\n  Inbox zero. Finished encodes that need a decision land here and wait until you "
                           "approve, deny or retry them.", style="dim"))
             return
+        self.query_one("#a-rest", Button).display = not isinstance(item, Batch)
         if isinstance(item, Batch):
             btn.label = "✓ Approve batch  y"
             d.update(self.batch_view(item))
@@ -1376,10 +1396,29 @@ class RecastApp(App):
             self.update_job_detail()
             self.update_frame()
 
+    def update_tree_marks(self) -> None:
+        """Keep ✓ / ● / ⚑ marks on loaded files in sync with the queue (labels only, no disk access)."""
+        status = {p: "done" for p in self.engine.done_paths()}
+        for j in self.engine.jobs.values():
+            if j.stage in ACTIVE or j.stage in ("to_replace", "replacing"):
+                status[norm(j.src)] = "busy"
+            elif j.stage == "awaiting":
+                status[norm(j.src)] = "wait"
+        if status == self._tree_status:
+            return
+        changed = {k for k in set(status) | set(self._tree_status) if status.get(k) != self._tree_status.get(k)}
+        self._tree_status = status
+        for node in self.query_one("#lib-tree", Tree)._tree_nodes.values():
+            d = node.data
+            if isinstance(d, Node) and d.kind == "file" and norm(d.path) in changed:
+                node.set_label(self.file_label(d.path, d.size, self.probes.cached(d.path)))
+
     def tick(self) -> None:
         if self.cfg.needs_setup:
             return
         self._ticks += 1
+        if self._ticks % 8 == 0:
+            self.update_tree_marks()
         sel = self.selected_job
         was_live = sel is not None and sel.stage in LIVE
         self.engine.tick()

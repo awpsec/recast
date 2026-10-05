@@ -260,6 +260,12 @@ class Engine:
                 t[2] += 1
         return {k: (v[1] / v[0], v[2]) for k, v in acc.items()}
 
+    def saved_under(self, folder: str) -> tuple[int, int, int]:
+        """(files, bytes before, bytes after) that recast replaced under this folder."""
+        root = norm(folder)
+        hs = [h for h in self.history if norm(h["src"]).startswith(root + os.sep) and h.get("out_size")]
+        return len(hs), sum(h["src_size"] for h in hs), sum(h["out_size"] for h in hs)
+
     def last_used(self, path: str) -> dict | None:
         """The most recent settings approved (or queued) for this show."""
         root = norm(show_root(path))

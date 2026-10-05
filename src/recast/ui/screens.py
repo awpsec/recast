@@ -394,6 +394,8 @@ class EncodeDialog(ModalScreen):
         out = os.path.join(self.cfg.scratch, "out", os.path.splitext(os.path.basename(m.path))[0] + "." + s.container)
         groups = build_command(s, m, src, out, self.caps, ffmpeg="ffmpeg")
         t = Text()
+        hidden = [g for g in groups if g and all(x.startswith("-metadata:s:") or x.endswith("=") for x in g)]
+        groups = [g for g in groups if g not in hidden]
         for i, grp in enumerate(groups):
             t.append("  " if i else "")
             for j, tok in enumerate(grp):
@@ -404,6 +406,9 @@ class EncodeDialog(ModalScreen):
                 t.append(q, style)
             if i < len(groups) - 1:
                 t.append(" ^\n" if WIN else " \\\n", "dim")
+        if hidden:
+            n = sum(len(g) for g in hidden) // 2
+            t.append(f"\n  # + {n} -metadata flags that clear stale bitrate tags from the source (not shown)", "dim")
         self.query_one("#cmd", Static).update(t)
         per = est_bytes(s, m, self.caps)
         enc, note = resolve_encoder(s, self.caps)
@@ -418,6 +423,9 @@ class EncodeDialog(ModalScreen):
         e.append(f" · ~{fps:.0f} fps · ≈{fdur(m.frames / fps if m.frames else m.duration)} per file")
         if note and note != "auto":
             e.append(f"\n          ⚠ {note}", "#e0af68")
+        if m.interlaced and not s.deinterlace and s.codec != "copy":
+            e.append("\n          ⚠ source is interlaced — turn on Deinterlace (Advanced) or use “DVD rescue”",
+                     "#e0af68")
         if m.hdr == "Dolby Vision" and s.codec != "copy":
             e.append("\n          ⚠ Dolby Vision layer is dropped; the HDR10 base layer is kept", "#e0af68")
         same = name != "__custom__" and settings_match(self.presets, name, s)
@@ -694,8 +702,10 @@ class HelpScreen(ModalScreen):
         for k, d in [("1-5", "switch tabs (or click them)"), ("↑ ↓ ← → / mouse", "browse the library"),
                      ("e", "encode the highlighted file, or a folder (try 1 file first, or all)"),
                      ("/", "find a show / season / file in the library"), ("f", "toggle frame preview"),
-                     ("[  ]", "frame preview refresh rate"), ("space", "pause / resume the active encode"),
-                     ("x", "cancel highlighted job"), ("y / n / r", "approve / deny / retry in Approvals"),
+                     ("[  ]", "frame preview refresh rate"), ("space", "pause / resume everything"),
+                     ("x / r / del", "cancel · retry failed · clear finished (Queue)"),
+                     ("y / n / r", "approve / deny / retry in Approvals"),
+                     ("a / s", "in the approval prompt: approve + rest of season / whole show"),
                      ("c", "compare frames (source vs encoded)"), ("ctrl+a", "advanced settings (encode dialog)"),
                      ("tab / ↑↓ / ctrl+space", "accept / choose / open suggestions in the preset editor"),
                      ("ctrl+s", "save preset (in the editor)"), ("ctrl+p", "command palette / themes"),

@@ -28,6 +28,7 @@ class ShowStat:
     saves: float = 0.0      # bytes freed by `best`
     measured: bool = False  # best's number comes from real results on this show
     done: int = 0           # files recast already re-encoded
+    dup_of: str = ""        # another show folder with (nearly) the same name
 
 
 def _norm(p: str) -> str:
@@ -78,9 +79,39 @@ def list_files(root: str, progress=None, cancelled=lambda: False) -> list[tuple[
     return out
 
 
+def keeps_quality(s, ms: list[MediaInfo]) -> bool:
+    """Would this preset keep these files' resolution and surround sound? ("auto" only recommends those.)"""
+    if s.resolution != "source" and any(m.height > int(s.resolution) for m in ms):
+        return False
+    if s.audio == "aac_stereo" and any(a.get("channels", 2) > 2 for m in ms for a in m.audio):
+        return False
+    return True
+
+
+def pretty_title(name: str) -> str:
+    """'Better.Call.Saul.S01.1080p.BluRay…' → 'Better Call Saul'; '13 Reasons Why (2017) S01 (…)' → '13 Reasons Why'."""
+    import re
+    n = re.sub(r"\[[^\]]*\]", "", name)
+    n = re.split(r"(?i)[ ._-]+(s\d\d|season \d+|\(?(19|20)\d\d\)?|1080p|720p|2160p|bdrip|bluray|web-?dl)\b", n)[0]
+    n = re.sub(r"[._]+", " ", n).strip(" -")
+    ascii_part = re.sub(r"[^\x00-\x7f]+", "", n).strip()
+    return ascii_part or n or name
+
+
+def dup_key(name: str) -> str:
+    """'Code Geass - Lelouch of the Rebellion' and 'Code Geass Lelouch Of The Rebellion (2006)' → same key."""
+    import re
+    n = re.sub(r"\((19|20)\d\d\)|\[[^\]]*\]", "", name.lower())
+    n = re.sub(r"\b(s\d\d|season \d+|1080p|720p|2160p|bdrip|bluray|web-?dl|x26[45]|hevc|dual audio)\b.*", "", n)
+    return re.sub(r"[^a-z0-9]", "", n)
+
+
 def rank(root: str, entries, infos: dict[str, MediaInfo], presets: dict, caps, done: set[str],
-         measured_for, title_of) -> list[ShowStat]:
-    """Group files by show and find, for each, the preset that saves the most bytes."""
+         measured_for, title_of, only: str | None = None, kind_of=lambda path: None) -> list[ShowStat]:
+    """Group files by show and find, for each, what to encode with.
+
+    only=None ("auto"): the preset that frees the most *without* downscaling or dropping surround, and anime
+    presets (animation tune) only for shows Sonarr marks as anime. only=name: rank everything by that preset."""
     groups: dict[str, list[MediaInfo]] = {}
     sizes: dict[str, int] = {}
     counts: dict[str, int] = {}
@@ -100,7 +131,12 @@ def rank(root: str, entries, infos: dict[str, MediaInfo], presets: dict, caps, d
         fresh = [m for m in ms if _norm(m.path) not in done]
         st.done = len(ms) - len(fresh)
         meas = measured_for(key)
+        kind = kind_of(key)
         for name, (_desc, s) in presets.items():
+            if only is not None and name != only:
+                continue
+            if only is None and (not keeps_quality(s, fresh) or (s.tune == "animation" and kind != "anime")):
+                continue
             todo = [m for m in fresh if not already_target(s, m, caps)]
             if not todo:
                 continue
@@ -113,4 +149,19 @@ def rank(root: str, entries, infos: dict[str, MediaInfo], presets: dict, caps, d
                 st.best, st.best_files, st.saves, st.measured = name, len(todo), src - out, real
         stats.append(st)
     stats.sort(key=lambda x: -x.saves)
+    for group in duplicate_groups(stats):
+        for st in group:
+            st.dup_of = group[0].name
     return stats
+
+
+def duplicate_groups(stats: list[ShowStat]) -> list[list[ShowStat]]:
+    """Folders whose names reduce to the same show (release folders next to the organised show, etc.).
+    Each group is sorted with the cleanest-looking name first."""
+    groups: dict[str, list[ShowStat]] = {}
+    for st in stats:
+        k = dup_key(st.name)
+        if k:
+            groups.setdefault(k, []).append(st)
+    out = [sorted(g, key=lambda x: (len(x.name), x.name)) for g in groups.values() if len(g) > 1]
+    return sorted(out, key=lambda g: -sum(x.size for x in g))

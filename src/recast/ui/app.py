@@ -25,7 +25,7 @@ from ..encode import (CODEC_LABEL, EncodeSettings, already_target, delete_preset
                       skip_reason, two_pass,
                       preset_doc, resolve_encoder, save_preset)
 from ..engine import ACTIVE, LIVE, Batch, Engine, Job, norm, show_root
-from ..overview import ShowStat, list_files, load_snapshot, rank, save_snapshot
+from ..overview import ShowStat, duplicate_groups, list_files, load_snapshot, pretty_title, rank, save_snapshot
 from ..probe import VIDEO_EXT, MediaInfo, ProbeCache
 from .editor import PresetEditor
 from .frames import FrameView, load_image
@@ -137,6 +137,7 @@ class RecastApp(App):
         Binding("slash", "jump", "Find"),
         Binding("u", "restore", "Restore original"),
         Binding("R", "rescan", "Rescan library"),
+        Binding("p", "rank_by", "Rank by…"),
         Binding("y", "approve", "Approve"),
         Binding("n", "deny", "Deny"),
         Binding("r", "retry", "Retry"),
@@ -175,6 +176,12 @@ class RecastApp(App):
         self.show_stats: dict[str, ShowStat] = {}       # show folder → stats (tree badges)
         self._scan: dict | None = None                  # progress of a running library scan
         self._quick_dirs: dict[str, list[str]] = {}
+        self._entries: dict[str, list] = {}       # root → listed files (from the scan / snapshot)
+        self._infos: dict[str, dict] = {}         # root → path → MediaInfo
+        self._snap_when: dict[str, float] = {}
+        self._overview_dirty = False
+        self._rank_by: str | None = "★"          # "★" = default preset, None = best of all, else a preset name
+        self._badges: dict[str, str] = {}         # tree node path → last label text (skip no-op relabels)
         self._ticks = 0
 
     # ── layout ──
@@ -624,26 +631,24 @@ class RecastApp(App):
 
     @work(thread=True, group="scan", exclusive=True)
     def scan_library(self, root: str, relist: bool) -> None:
+        """Background: list files (once a day), read headers for new ones, rank. Never waits on the UI —
+        it publishes into self.overview and the UI timer redraws."""
         worker = get_current_worker()
-        call = self.call_from_thread
         snap = None if relist else load_snapshot(root)
         if snap:
             entries = [tuple(e) for e in snap["files"]]
         else:
             self._scan = {"root": root, "phase": "listing", "done": 0, "total": 0}
-            call(self.render_overview, root)
-            last = [0.0]
 
             def listed(n):
-                if time.monotonic() - last[0] > 0.5:
-                    last[0] = time.monotonic()
-                    self._scan["done"] = n
-                    call(self.render_overview, root)
+                self._scan["done"] = n
             entries = list_files(root, listed, lambda: worker.is_cancelled)
             if worker.is_cancelled:
                 self._scan = None
                 return
             save_snapshot(root, entries)
+        self._snap_when[root] = time.time() if not snap else snap["when"]
+        self._entries[root] = entries
         infos = {}
         todo = []
         for p, size, mtime in entries:
@@ -652,8 +657,9 @@ class RecastApp(App):
                 infos[p] = m
             else:
                 todo.append(p)
+        self._infos[root] = infos
         self._scan = {"root": root, "phase": "reading", "done": 0, "total": len(todo), "t0": time.monotonic()}
-        self._publish_overview(root, entries, infos)
+        self._publish_overview(root)
         if todo:
             from concurrent.futures import ThreadPoolExecutor, as_completed
             last = time.monotonic()
@@ -669,21 +675,21 @@ class RecastApp(App):
                     if not m.error:
                         infos[futs[f]] = m
                     self._scan["done"] = i
-                    if time.monotonic() - last > 3:
+                    if time.monotonic() - last > 5:
                         last = time.monotonic()
-                        self._publish_overview(root, entries, infos)
+                        self._publish_overview(root)
                     if i % 300 == 0:
                         self.probes.save()  # a quit halfway keeps what was read
             self.probes.save()
         took = time.monotonic() - self._scan.get("t0", time.monotonic()) if self._scan else 0
         self._scan = None
-        self._publish_overview(root, entries, infos)
+        self._publish_overview(root)
         top = next(iter(self.overview.get(root, [])), None)
         if took > 20 and top and top.saves > 0:
-            call(self.notify, f"Biggest win: {top.name} — {top.best} saves ≈{fsize(top.saves)}.\n"
-                 "Highlight the library line to see the full ranking; e on a row encodes that show.",
-                 title="✓ Library scanned", timeout=12)
-            call(self.desktop, "Library scanned", f"Biggest win: {top.name} saves ≈{fsize(top.saves)}")
+            self.call_from_thread(self.notify, f"Biggest win: {top.name} — {top.best} saves ≈{fsize(top.saves)}.\n"
+                                  "Highlight the library line for the full ranking; e on a row encodes that show.",
+                                  title="✓ Library scanned", timeout=12)
+            self.call_from_thread(self.desktop, "Library scanned", f"Biggest win: {top.name} saves ≈{fsize(top.saves)}")
 
     @staticmethod
     def _scan_eta(sc: dict) -> str:
@@ -692,13 +698,47 @@ class RecastApp(App):
         rate = sc["done"] / max(1e-3, time.monotonic() - sc["t0"])
         return f" · ~{fdur((sc['total'] - sc['done']) / rate)} left"
 
-    def _publish_overview(self, root: str, entries, infos) -> None:
+    def _publish_overview(self, root: str) -> None:
+        """Rank (cheap: pure arithmetic on cached headers) and flag the UI to redraw."""
+        entries, infos = self._entries.get(root), self._infos.get(root, {})
+        if entries is None:
+            return
+        only = self.cfg.default_preset if self._rank_by == "★" else self._rank_by
+        if only is not None and only not in self.presets:
+            only = None
         stats = rank(root, entries, infos, self.presets, self.cfg.encoders, self.engine.done_paths(),
-                     self.engine.measured, self._title_of(root))
+                     self.engine.measured, self._title_of(root), only=only, kind_of=self._series_type)
         self.overview[root] = stats
-        self.show_stats.update({norm(s.path): s for s in stats})
-        self.call_from_thread(self.render_overview, root)
-        self.call_from_thread(self.badge_tree)
+        self.show_stats.update({norm(st.path): st for st in stats})
+        self._overview_dirty = True
+
+    def _series_type(self, path: str) -> str | None:
+        rec = self.arr.lookup(path) if self.arr else None
+        return (rec or {}).get("series_type") or None
+
+    def action_rank_by(self) -> None:
+        """Cycle what the biggest-wins table ranks by: your default preset → each other preset → best of all."""
+        names = ["★", *[n for n in self.presets if n != self.cfg.default_preset], None]
+        self._rank_by = names[(names.index(self._rank_by) + 1) % len(names)] if self._rank_by in names else "★"
+        d = self.current_node()
+        if d and self.is_root(d.path):
+            self._publish_overview(d.root.path)
+            self._redraw_overview_if_dirty()
+            self.notify("Ranking by " + self._rank_label(), timeout=3)
+
+    def _rank_label(self) -> str:
+        if self._rank_by == "★":
+            return f"★ {self.cfg.default_preset} (your default)"
+        return self._rank_by or "best of all (keeps resolution & surround; anime presets only for Sonarr anime)"
+
+    def _redraw_overview_if_dirty(self) -> None:
+        if not self._overview_dirty:
+            return
+        self._overview_dirty = False
+        d = self.current_node()
+        if d and self.is_root(d.path):
+            self.render_overview(d.root.path)
+        self.badge_tree()
 
     def _title_of(self, root: str):
         nroot = norm(root)
@@ -727,25 +767,37 @@ class RecastApp(App):
             total = sum(s.size for s in stats)
             saves = sum(s.saves for s in stats)
             n = sum(s.files for s in stats)
-            snap = load_snapshot(root)
-            age = _ago(snap["when"]).replace("since", "listed") if snap else ""
+            when = self._snap_when.get(root)
+            age = _ago(when).replace("since", "listed") if when else ""
             head.append(Text.assemble(("Biggest wins", "bold"), f"  ·  {len(stats)} shows · {n:,} files · {fsize(total)}",
                                       ("  ·  best case saves ", "dim"), (f"≈{fsize(saves)}", "bold #9ece6a"),
                                       (f"  ·  {age} · R rescans", "dim")))
-            head.append(Text("Each row uses the preset that frees the most for that show (·m = measured from your "
-                             "real encodes). Enter/click jumps to the show · e encodes it with that preset.",
-                             style="dim"))
+            head.append(Text.assemble(("Ranked by ", "dim"), (self._rank_label(), "#e0af68"),
+                                      ("  ·  p changes · ·m = measured from your encodes · Enter jumps · e encodes",
+                                       "dim")))
+            groups = duplicate_groups(stats)
+            if groups:
+                ex = ", ".join(f"{pretty_title(g[0].name)} ×{len(g)}" for g in groups[:6])
+                head.append(Text(f"⧉ {len(groups)} shows are spread over several folders ({ex}"
+                                 + ("…" if len(groups) > 6 else "") + "). Some are leftover duplicate downloads, some "
+                                 "are season packs never moved into the show's folder — worth tidying (rows marked ⧉).",
+                                 style="#e0af68"))
         elif not sc:
             head.append(Text("No video files found here.", style="dim"))
         self._set_details(Group(*head))
         t = self.query_one("#wins", DataTable)
         avail = max(30, (self.query_one("#details-scroll").size.width or 80) - 6)
         mode = "wide" if avail >= 112 else "mid" if avail >= 66 else "narrow"
+        if self._rank_by is not None and mode != "narrow":
+            mode += "-1"  # one preset for every row: no per-row preset column
         cols = {"wide": (("show", "Show", avail - 78), ("size", "Size", 9), ("files", "Files", 6),
                          ("codecs", "Codecs", 16), ("preset", "Best preset", 26), ("saves", "Saves", 15)),
                 "mid": (("show", "Show", avail - 50), ("size", "Size", 9), ("preset", "Best preset", 22),
                         ("saves", "Saves", 15)),
-                "narrow": (("show", "Show", avail - 16), ("saves", "Saves", 14))}[mode]
+                "narrow": (("show", "Show", avail - 16), ("saves", "Saves", 14)),
+                "wide-1": (("show", "Show", avail - 52), ("size", "Size", 9), ("files", "Files", 6),
+                           ("codecs", "Codecs", 16), ("saves", "Saves", 15)),
+                "mid-1": (("show", "Show", avail - 26), ("size", "Size", 9), ("saves", "Saves", 15))}[mode]
         if getattr(self, "_wins_mode", None) != (mode, avail):
             self._wins_mode = (mode, avail)
             t.clear(columns=True)
@@ -760,8 +812,8 @@ class RecastApp(App):
             pct = s.saves / max(1, s.size)
             saves = Text(f"{fsize(s.saves)} {-pct * 100:.0f}%" if s.saves > 0 else "—",
                          style="bold #9ece6a" if pct >= 0.3 else "#9ece6a" if s.saves > 0 else "dim")
-            name = Text(s.name + (" ✓" * bool(s.done)), style="" if s.saves > 0 else "dim", no_wrap=True,
-                        overflow="ellipsis")
+            name = Text(s.name + (" ✓" * bool(s.done)) + (" ⧉" if s.dup_of else ""),
+                        style="" if s.saves > 0 else "dim", no_wrap=True, overflow="ellipsis")
             cells = {"show": name, "size": fsize(s.size), "files": str(s.files), "codecs": codecs,
                      "preset": Text((s.best or "nothing to gain") + (" ·m" if s.measured else ""),
                                     style="#e0af68" if s.best else "dim", no_wrap=True, overflow="ellipsis"),
@@ -775,11 +827,14 @@ class RecastApp(App):
             self.query_one("#lib-tree").focus()
 
     def badge_tree(self) -> None:
-        """Show size + potential saving next to show folders in the tree."""
-        for node in self.query_one("#lib-tree", Tree)._tree_nodes.values():
+        """Show size + potential saving next to show folders in the tree (only relabels what changed)."""
+        for node in list(self.query_one("#lib-tree", Tree)._tree_nodes.values()):
             d = node.data
             if isinstance(d, Node) and d.kind == "dir" and norm(d.path) in self.show_stats:
-                node.set_label(self.folder_label(d.path))
+                label = self.folder_label(d.path)
+                if self._badges.get(d.path) != label.plain:
+                    self._badges[d.path] = label.plain
+                    node.set_label(label)
 
     def folder_label(self, path: str) -> Text:
         t = Text(os.path.basename(path.rstrip("/\\")))
@@ -1189,7 +1244,7 @@ class RecastApp(App):
 
     # ── actions ──
     TAB_ACTIONS = {
-        "tab-library": {"encode", "jump", "restore", "rescan"},
+        "tab-library": {"encode", "jump", "restore", "rescan", "rank_by"},
         "tab-queue": {"cancel_job", "retry", "clear_finished", "toggle_frame", "cadence"},
         "tab-approvals": {"approve", "deny", "retry", "compare"},
         "tab-presets": {"save_preset"},
@@ -1212,7 +1267,7 @@ class RecastApp(App):
             return False
         if action in ("toggle_frame", "cadence") and self.screen.has_class("-narrow"):
             return False  # the frame panel is hidden at this width anyway
-        if action == "rescan":
+        if action in ("rescan", "rank_by"):
             d = self.current_node()
             return bool(d and self.is_root(d.path))
         if action == "restore":  # only meaningful on a file recast replaced
@@ -1858,6 +1913,8 @@ class RecastApp(App):
         self._ticks += 1
         if self._ticks % 8 == 0:
             self.update_tree_marks()
+        if self._ticks % 4 == 0 or (self._overview_dirty and not self._scan):
+            self._redraw_overview_if_dirty()
         sel = self.selected_job
         was_live = sel is not None and sel.stage in LIVE
         self.engine.tick()

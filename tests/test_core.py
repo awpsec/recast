@@ -211,3 +211,33 @@ def test_suggest_libraries_finds_media_folders(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "is_network_path", lambda p: True)
     found = [p for p, _ in cfg.suggest_libraries(mounts=[str(nas), str(tmp_path / "missing")])]
     assert found == [str(nas / "movies"), str(nas / "tv")]
+
+
+def test_best_of_all_never_downscales_or_drops_surround_and_respects_anime():
+    from recast.encode import default_presets
+    from recast.engine import show_root
+    from recast.overview import rank
+    m = media(path="/tv/Show/Season 1/e1.mkv", codec="HEVC", codec_name="hevc", vkbps=1300, size=660 * 1024**2,
+              audio=[{"lang": "eng", "codec": "eac3", "channels": 6, "kbps": 640}] * 4)
+    stats = rank("/tv", [(m.path, m.size, 0)], {m.path: m}, default_presets(), MAC, set(), lambda p: {}, show_root)
+    assert stats[0].best != "H.264 max compat · 720p"           # would shrink most, but drops 5.1 and resolution
+    fat = media(path="/tv/Anime/Season 1/e1.mkv", codec="H.264", codec_name="h264", vkbps=9000, size=1600 * 1024**2)
+    pre = default_presets()
+    std = rank("/tv", [(fat.path, fat.size, 0)], {fat.path: fat}, pre, MAC, set(), lambda p: {}, show_root)
+    anime = rank("/tv", [(fat.path, fat.size, 0)], {fat.path: fat}, pre, MAC, set(), lambda p: {}, show_root,
+                 kind_of=lambda p: "anime")
+    assert pre[std[0].best][1].tune != "animation"              # unknown/standard show: no anime presets
+    only = rank("/tv", [(fat.path, fat.size, 0)], {fat.path: fat}, pre, MAC, set(), lambda p: {}, show_root,
+                only="Live action HEVC · 3200k · 5.1")
+    assert only[0].best == "Live action HEVC · 3200k · 5.1"
+    assert anime[0].saves >= std[0].saves
+
+
+def test_duplicate_groups_and_pretty_titles():
+    from recast.overview import ShowStat, duplicate_groups, pretty_title
+    stats = [ShowStat("/tv/Better Call Saul", "Better Call Saul", size=10),
+             ShowStat("/tv/Better.Call.Saul.S01.1080p.BluRay", "Better.Call.Saul.S01.1080p.BluRay", size=5),
+             ShowStat("/tv/Lost", "Lost", size=50)]
+    g = duplicate_groups(stats)
+    assert len(g) == 1 and g[0][0].name == "Better Call Saul" and len(g[0]) == 2
+    assert pretty_title("13 Reasons Why (2017) S01 (1080p WEB AV1)") == "13 Reasons Why"

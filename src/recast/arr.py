@@ -89,6 +89,7 @@ class ArrIndex:
                            "path": local}
                     if kind == "Sonarr":
                         rec["episodes"] = f"{stats.get('episodeFileCount', 0)}/{stats.get('episodeCount', 0)} files"
+                        rec["series_type"] = r.get("seriesType", "")  # "anime" / "standard" / "daily"
                         rec["network"] = r.get("network", "")
                     else:
                         mf = r.get("movieFile") or {}

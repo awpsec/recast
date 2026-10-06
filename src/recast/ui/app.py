@@ -171,6 +171,7 @@ class RecastApp(App):
         self._copy_rate: dict[int, tuple[float, int, float]] = {}
         self._tree_status: dict[str, str] = {}
         self._tree_w = 80
+        self._stat: dict[str, tuple[int, float]] = {}  # path → (size, mtime) seen while listing folders
         self._details_w = 80
         self.overview: dict[str, list[ShowStat]] = {}   # root → ranked shows
         self.show_stats: dict[str, ShowStat] = {}       # show folder → stats (tree badges)
@@ -451,7 +452,9 @@ class RecastApp(App):
                     dirs.append(e.path)
                 elif os.path.splitext(e.name)[1].lower() in VIDEO_EXT:
                     try:
-                        files.append((e.path, e.stat().st_size))
+                        st = e.stat()
+                        files.append((e.path, st.st_size))
+                        self._stat[e.path] = (st.st_size, st.st_mtime)
                     except OSError:
                         pass
         except OSError as ex:
@@ -459,7 +462,7 @@ class RecastApp(App):
             return
         dirs.sort(key=str.lower)
         files.sort(key=lambda f: f[0].lower())
-        cached = {p: self.probes.cached(p) for p, _ in files}
+        cached = {p: self.cached_info(p) for p, _ in files}
         self.call_from_thread(self._fill_dir, node, dirs, files, cached)
 
     def _fill_dir(self, node, dirs, files, cached) -> None:
@@ -485,6 +488,11 @@ class RecastApp(App):
                 if pick:
                     tree.move_cursor(pick)
                     self.show_details(pick.data, pick)
+
+    def cached_info(self, path: str) -> MediaInfo | None:
+        """Probe-cache lookup without touching the network when we've already listed the folder."""
+        st = self._stat.get(path)
+        return self.probes.cached_meta(path, *st) if st else self.probes.cached(path)
 
     def file_label(self, path: str, size: int, m: MediaInfo | None) -> Text:
         key = norm(path)
@@ -562,7 +570,7 @@ class RecastApp(App):
             if not worker.is_cancelled:
                 self.call_from_thread(fn, *a)
         if d.kind == "file":
-            m = self.probes.cached(d.path)
+            m = self.cached_info(d.path)
             if not m:
                 call(self._set_details, Text(f"reading {os.path.basename(d.path)}…", style="dim"))
                 m = self.probes.get(d.path)
@@ -577,7 +585,7 @@ class RecastApp(App):
             files = self.walk(d.path, limit=0 if is_root else 3000)
             call(self._set_details, self.folder_details(d, files, rec, probed=False, is_root=is_root))
             if not is_root and len(files) <= 2000:
-                todo = [p for p, _ in files if not self.probes.cached(p)]
+                todo = [p for p, _ in files if not self.cached_info(p)]
                 for i, p in enumerate(todo):
                     if worker.is_cancelled:
                         return
@@ -598,7 +606,9 @@ class RecastApp(App):
                 if os.path.splitext(n)[1].lower() in VIDEO_EXT:
                     p = os.path.join(dirpath, n)
                     try:
-                        out.append((p, os.path.getsize(p)))
+                        st = os.stat(p)
+                        out.append((p, st.st_size))
+                        self._stat[p] = (st.st_size, st.st_mtime)
                     except OSError:
                         pass
                     if len(out) >= limit:
@@ -986,7 +996,7 @@ class RecastApp(App):
             return Group(*parts)
         total = sum(sz for _, sz in files) or 1
         parts += [Text(""), Text(f"{len(files)} video files · {fsize(total)}", style="bold")]
-        infos = [m for m in (self.probes.cached(p) for p, _ in files) if m]
+        infos = [m for m in (self.cached_info(p) for p, _ in files) if m]
         if progress:
             parts.append(Text(f"reading headers {progress[0]}/{progress[1]}…", style="dim"))
         if infos:
@@ -1052,7 +1062,7 @@ class RecastApp(App):
             call(self.notify, "No video files here.", severity="warning")
             return
         infos, bad = [], 0
-        uncached = sum(1 for p in paths if not self.probes.cached(p))
+        uncached = sum(1 for p in paths if not self.cached_info(p))
         if uncached > 20:
             call(self.notify, f"Reading {uncached} file headers (first time only — cached after this)…",
                  title="Encode", timeout=6)
@@ -1906,7 +1916,7 @@ class RecastApp(App):
         for node in self.query_one("#lib-tree", Tree)._tree_nodes.values():
             d = node.data
             if isinstance(d, Node) and d.kind == "file" and norm(d.path) in changed:
-                node.set_label(self.file_label(d.path, d.size, self.probes.cached(d.path)))
+                node.set_label(self.file_label(d.path, d.size, self.cached_info(d.path)))
 
     def tick(self) -> None:
         if self.cfg.needs_setup:

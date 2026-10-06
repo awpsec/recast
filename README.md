@@ -5,9 +5,12 @@ encode one file or a whole season, watch it happen, then approve before anything
 your library changes.
 
 - **Find your biggest wins**: highlight a library folder and recast scans it in the
-  background (headers only, cached), then ranks every show by how much space its best
-  preset would free. `e` on a row encodes that show; show folders in the tree get their
-  size and potential saving next to the name.
+  background (headers only, cached — a 10k-file NAS library takes ~20 min once, then
+  it's instant), then ranks every show by how much space your default preset would free.
+  `p` switches the preset (or "best of all", which never downscales or drops surround).
+  `e` on a row encodes that show; show folders in the tree get their size and potential
+  saving; shows spread over several folders (leftover downloads, loose season packs)
+  are flagged.
 - **Browse the library** (arrows, mouse; it reopens where you left off) and see codec,
   bitrate, tracks and Sonarr/Radarr info for any file or folder. `/` is a quick-open
   that searches every show, season and episode.
@@ -89,7 +92,7 @@ Re-run detection any time from Settings or with `recast --setup`.
 | `1`–`5` | Library · Queue · Approvals · Presets · Settings (or click) |
 | `/` | find any show / season / episode |
 | `e`, Enter, double-click | encode the highlighted episode (or folder with `e`) |
-| `R` | rescan the library (on the library line) |
+| `R` / `p` | on the library line: rescan · change the preset the ranking uses |
 | `u` | restore the original of a file recast replaced |
 | `f`, `[` `]` | frame preview on/off, refresh rate |
 | `space` | pause / resume everything |

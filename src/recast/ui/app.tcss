@@ -90,7 +90,6 @@ PresetEditor .text-area--suggestion { color: #565f89; text-style: italic; }
 Input.inactive { color: $text-disabled; border: tall $panel; }
 Input.inactive:focus { color: $text; }
 #enc-box Input { border-title-align: right; border-subtitle-align: right; }
-.grid4 { grid-rows: 4; }
 #wins { height: auto; max-height: 100%; display: none; margin-top: 1; }
 
 /* ── responsive ── */
@@ -114,3 +113,4 @@ Screen.-short #lib-actions { display: none; }
 Screen.-narrow #find-box { width: 100%; }
 #su-picks { height: auto; layout: grid; grid-size: 3; grid-gutter: 0 1; }
 #su-picks Button { width: 100%; }
+Screen.-short #preset-help { display: none; }

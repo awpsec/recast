@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from dataclasses import asdict, dataclass
 
@@ -103,10 +104,18 @@ def _ago(ts: float) -> str:
     return time.strftime("since %a %H:%M", time.localtime(ts))
 
 
+EP_RX = re.compile(r"S\d{1,2}E\d{1,3}", re.I)
+
+
 def _mid(name: str, width: int) -> str:
-    """Shorten from the middle: the end is where SxxEyy, quality and codec live."""
+    """Shorten from the middle: the end is where SxxEyy, quality and codec live.
+    When it's really tight, lead with the episode code: that's what you scan for."""
     if len(name) <= width:
         return name
+    ep = EP_RX.search(name)
+    if ep and width < 32:
+        rest = name[ep.end():].lstrip(" -._")
+        return (ep.group(0) + " " + rest)[:width]
     tail = max(8, width * 3 // 5)
     return name[:width - tail - 1] + "…" + name[-tail:]
 
@@ -161,6 +170,7 @@ class RecastApp(App):
         self._copy_rate: dict[int, tuple[float, int, float]] = {}
         self._tree_status: dict[str, str] = {}
         self._tree_w = 80
+        self._details_w = 80
         self.overview: dict[str, list[ShowStat]] = {}   # root → ranked shows
         self.show_stats: dict[str, ShowStat] = {}       # show folder → stats (tree badges)
         self._scan: dict | None = None                  # progress of a running library scan
@@ -343,6 +353,7 @@ class RecastApp(App):
     def _measure_tree(self) -> None:
         try:
             self._tree_w = self.query_one("#lib-tree").size.width or self._tree_w
+            self._details_w = self.query_one("#details-scroll").size.width or self._details_w
             d = self.current_node()
             if d and self.is_root(d.path):
                 self.render_overview(d.root.path)  # re-fit the wins table to the new width
@@ -472,13 +483,19 @@ class RecastApp(App):
         key = norm(path)
         st = self._tree_status.get(key, "")
         mark = {"done": ("✓ ", "#9ece6a"), "busy": ("● ", "#e0af68"), "wait": ("⚑ ", "#bb9af7")}.get(st, ("  ", ""))
-        width = max(24, min(60, self._tree_w - 28))
+        root = self.root_for(path)
+        depth = os.path.relpath(path, root.path).count(os.sep) + 1 if root else 3
+        avail = self._tree_w - 3 * depth - 6  # tree guides indent each level
+        roomy = avail >= 52
+        width = max(12, min(60, avail - (17 if roomy else 7)))
         name = _mid(os.path.basename(path), width)
         t = Text.assemble(mark, name.ljust(width + 1))
         if m:
             t.append_text(badge(m.codec))
-            t.append(f" {m.res:>5}", "dim")
-        t.append(f" {fsize(size):>9}", "dim")
+            if roomy:
+                t.append(f" {m.res:>5}", "dim")
+        if roomy:
+            t.append(f" {fsize(size):>9}", "dim")
         return t
 
     def current_node(self) -> Node | None:
@@ -586,6 +603,13 @@ class RecastApp(App):
 
     # ── library overview: biggest wins ──
     def open_overview(self, root: Root, force: bool = False) -> None:
+        if not os.path.isdir(root.path):
+            self.query_one("#wins", DataTable).display = False
+            self._set_details(Text.assemble((root.name, "bold #c0caf5"), ("  " + root.path, "dim"), "\n\n",
+                                            ("✗ Can't reach this folder right now.", "bold #f7768e"), "\n",
+                                            "If it's a NAS share, make sure it's mounted (macOS unmounts shares "
+                                            "after sleep sometimes), then press Refresh.", style=""))
+            return
         self.render_overview(root.path)
         snap = load_snapshot(root.path)
         fresh = snap and time.time() - snap["when"] < 86400
@@ -842,20 +866,25 @@ class RecastApp(App):
         t = Table(box=None, padding=(0, 1), header_style="bold dim", title_justify="left",
                   title=Text("What each preset would do", style="bold"), show_edge=False, expand=False)
         one_line = {"no_wrap": True, "overflow": "ellipsis"}
-        for c, kw in (("", {"width": 2}), ("Preset", {"max_width": 26, "ratio": 3, **one_line}),
-                      ("Encoder", {"style": "#7dcfff", "max_width": 14, **one_line}),
-                      ("Files", {"justify": "right", **one_line}), ("After", {"justify": "right", **one_line}),
-                      ("Saves", {"justify": "right", **one_line}), ("", {"style": "dim", **one_line})):
-            t.add_column(c, **kw)
+        compact = self._details_w < 72  # small terminal: keep the columns that matter
+        cols = (("", {"width": 2}), ("Preset", {"max_width": 26, "ratio": 3, **one_line}),
+                ("Encoder", {"style": "#7dcfff", "max_width": 14, **one_line}),
+                ("Files", {"justify": "right", **one_line}), ("After", {"justify": "right", **one_line}),
+                ("Saves", {"justify": "right", **one_line}), ("", {"style": "dim", **one_line}))
+        keep = (0, 1, 5, 6) if compact else tuple(range(7))
+        for i in keep:
+            t.add_column(cols[i][0], **cols[i][1])
         best = next((r for r in rows if r[0] < 0), None)
         for pct, name, s, n, src, out, how in rows:
             mark = Text.assemble(("★" if name == self.cfg.default_preset else " ", "#e0af68"),
                                  ("◆" if name == last_name or last and name == last["preset"] else " ", "#bb9af7"))
             col = "bold #9ece6a" if pct <= -0.10 else "#e0af68" if pct < 0 else "bold #f7768e"
-            t.add_row(mark, Text(name, style="bold" if best and name == best[1] else ""),
-                      resolve_encoder(s, caps)[0].replace("_videotoolbox", "_vt"), str(n), f"≈{fsize(out)}",
-                      Text(f"{pct * 100:+.0f}%", style=col),
-                      Text(how.replace("estimate", "est."), style="#9ece6a" if how.startswith("measured") else "dim"))
+            row = (mark, Text(name, style="bold" if best and name == best[1] else ""),
+                   resolve_encoder(s, caps)[0].replace("_videotoolbox", "_vt"), str(n), f"≈{fsize(out)}",
+                   Text(f"{pct * 100:+.0f}%", style=col),
+                   Text(how.replace("estimate", "est.").replace("measured · ", "✓ "),
+                        style="#9ece6a" if how.startswith("measured") else "dim"))
+            t.add_row(*(row[i] for i in keep))
         summary = Text()
         dflt = next((r for r in rows if r[1] == self.cfg.default_preset and r[0] != 9.0), None)
         for label, r in (("best", best), ("default", dflt if dflt is not best else None)):
@@ -1176,10 +1205,19 @@ class RecastApp(App):
 
     def on_click(self, event) -> None:
         """Double-click a file in the library to encode it."""
+        self._last_click = time.monotonic()
         if getattr(event, "chain", 1) == 2 and getattr(event.widget, "id", "") == "lib-tree":
             d = self.current_node()
             if d and d.kind == "file":
                 self.action_encode()
+
+    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
+        """Enter on an episode opens the encode dialog (a single mouse click only highlights)."""
+        if time.monotonic() - getattr(self, "_last_click", 0) < 0.4:
+            return
+        d = event.node.data
+        if isinstance(d, Node) and d.kind == "file":
+            self.action_encode()
 
     def action_jump(self) -> None:
         self.action_tab("tab-library")

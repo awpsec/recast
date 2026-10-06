@@ -75,8 +75,22 @@ MEDIA_NAMES = {"tv", "tv shows", "shows", "series", "movies", "films", "anime", 
                "docs", "media", "video", "videos", "plex", "4k", "uhd", "cartoons"}
 
 
-def suggest_libraries(limit: int = 8) -> list[tuple[str, bool]]:
+def suggest_libraries(limit: int = 8, mounts: list[str] | None = None) -> list[tuple[str, bool]]:
     """Likely media folders on mounted drives/shares: [(path, is_network)]. Quick: one listing per mount."""
+    if mounts is None:
+        mounts = _mount_points()
+    out: list[tuple[str, bool]] = []
+    for m in mounts:
+        if not os.path.isdir(m):
+            continue
+        subs = [os.path.join(m, n) for n in _ls(m) if n.lower() in MEDIA_NAMES and os.path.isdir(os.path.join(m, n))]
+        net = is_network_path(m)
+        for p in subs or ([m] if net else []):
+            out.append((p, net))
+    return out[:limit]
+
+
+def _mount_points() -> list[str]:
     mounts: list[str] = []
     if sys.platform == "darwin":
         mounts = [os.path.join("/Volumes", n) for n in _ls("/Volumes") if n != "Macintosh HD"]
@@ -87,15 +101,7 @@ def suggest_libraries(limit: int = 8) -> list[tuple[str, bool]]:
         mounts = [os.path.join("/mnt", n) for n in _ls("/mnt")] + \
                  [os.path.join("/media", u, n) for u in _ls("/media") for n in _ls(os.path.join("/media", u))] + \
                  [os.path.join("/srv", n) for n in _ls("/srv")] + [os.path.expanduser("~/Videos")]
-    out: list[tuple[str, bool]] = []
-    for m in mounts:
-        if not os.path.isdir(m):
-            continue
-        subs = [os.path.join(m, n) for n in _ls(m) if n.lower() in MEDIA_NAMES and os.path.isdir(os.path.join(m, n))]
-        net = is_network_path(m)
-        for p in subs or ([m] if net else []):
-            out.append((p, net))
-    return out[:limit]
+    return mounts
 
 
 def _ls(path: str) -> list[str]:

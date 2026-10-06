@@ -251,7 +251,6 @@ async def test_restore_original(home, library, tmp_path):
 
 
 async def test_two_pass_and_eac3_end_to_end(home, tmp_path):
-    import make_library
     import subprocess as sp
     lib = tmp_path / "lib"
     src = lib / "Movies" / "Film (2020)" / "Film (2020).mkv"

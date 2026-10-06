@@ -179,3 +179,35 @@ def test_new_presets_exist():
     anime, live = p["Anime HEVC · 1800k"][1], p["Live action HEVC · 3200k · 5.1"][1]
     assert (anime.bitrate, anime.resolution, anime.audio, anime.encoder) == (1800, "source", "copy", "libx265")
     assert (live.bitrate, live.resolution, live.audio) == (3200, "1080", "eac3_51")
+
+
+def test_overview_ranks_shows_by_best_saving(tmp_path):
+    from recast.encode import default_presets
+    from recast.overview import rank
+    fat = media(path=str(tmp_path / "TV" / "Fat Show" / "Season 1" / "e1.mkv"), codec="H.264", codec_name="h264",
+                vkbps=9000, size=1600 * 1024**2)
+    lean = media(path=str(tmp_path / "TV" / "Lean Show" / "Season 1" / "e1.mkv"), codec="HEVC", codec_name="hevc",
+                 vkbps=1200, size=300 * 1024**2)
+    entries = [(fat.path, fat.size, 0), (lean.path, lean.size, 0)]
+    from recast.engine import show_root
+    stats = rank(str(tmp_path / "TV"), entries, {fat.path: fat, lean.path: lean}, {
+        k: v for k, v in default_presets().items()}, MAC, set(), lambda p: {}, show_root)
+    assert [s.name for s in stats] == ["Fat Show", "Lean Show"]
+    assert stats[0].saves > 1000 * 1024**2 and stats[0].best
+    assert stats[1].saves < stats[0].saves
+
+
+def test_episode_code_survives_shortening():
+    from recast.ui.app import _mid
+    n = "Law & Order - Special Victims Unit - S13E15 1080p AV1.mkv"
+    assert _mid(n, 20).startswith("S13E15") and _mid(n, 44).endswith("S13E15 1080p AV1.mkv") and _mid(n, 80) == n
+
+
+def test_suggest_libraries_finds_media_folders(tmp_path, monkeypatch):
+    import recast.config as cfg
+    nas = tmp_path / "nas"
+    for d in ("tv", "movies", "photos"):
+        (nas / d).mkdir(parents=True)
+    monkeypatch.setattr(cfg, "is_network_path", lambda p: True)
+    found = [p for p, _ in cfg.suggest_libraries(mounts=[str(nas), str(tmp_path / "missing")])]
+    assert found == [str(nas / "movies"), str(nas / "tv")]

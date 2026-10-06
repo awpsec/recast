@@ -67,3 +67,30 @@ async def test_episode_then_rest_of_season(home, tmp_path):
                    [f"Show - S01E0{e} 1080p HEVC.mkv" for e in (1, 2, 3)])
         await wait(pilot, lambda: all("HEVC" in str(c.label) for c in s1.children), 10)   # tree refreshed
         assert {h["preset"] for h in app.engine.history} == {"Anime → HEVC · quality*"}
+
+
+async def test_find_palette_searches_everything(home, tmp_path):
+    lib = tmp_path / "lib"
+    for show, n in (("Alpha Show (2020)", 2), ("Beta Show (2021)", 2)):
+        for e in range(1, n + 1):
+            make_library.episode(lib / show / "Season 1" / f"{show[:10]} - S01E0{e}.mkv",
+                                 ["-c:v", "libx264", "-preset", "ultrafast"], size="320x240", secs=1, subs=False)
+    Config(roots=[Root("Lib", str(lib), remote=False)], scratch=str(tmp_path / "scratch"), ffmpeg="ffmpeg",
+           ffprobe="ffprobe", ffmpeg_version="t", machine={"host": "t"}, desktop_notify=False,
+           encoders={"libx265": EncoderCap("ok", 60)}).save()
+    app = RecastApp()
+    async with app.run_test(size=(140, 40)) as pilot:
+        tree = app.query_one("#lib-tree")
+        await wait(pilot, lambda: tree.root.children and tree.root.children[0].data.loaded, 10)
+        tree.move_cursor(tree.root.children[0])                 # highlight the library → overview scan
+        await wait(pilot, lambda: app._scan is None and app.overview, 30)
+        assert [s.name for s in app.overview[str(lib)]] and app.query_one("#wins").row_count == 2
+        tree.root.children[0].collapse()
+        await pilot.press("slash")
+        await wait(pilot, lambda: type(app.screen).__name__ == "FindScreen", 5)
+        await pilot.press(*"beta e02")
+        await pilot.pause(0.3)
+        assert [Path(h).name for h in app.screen.hits] == ["Beta Show  - S01E02.mkv"]
+        await pilot.press("enter")
+        await wait(pilot, lambda: tree.cursor_node and tree.cursor_node.data.path.endswith("S01E02.mkv")
+                   and "Beta" in tree.cursor_node.data.path, 10)

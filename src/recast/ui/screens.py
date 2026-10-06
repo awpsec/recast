@@ -816,26 +816,35 @@ class CompareScreen(ModalScreen):
 
 class HelpScreen(ModalScreen):
     BINDINGS = [Binding("escape,question_mark,q", "dismiss(None)", "Close")]
+    SECTIONS = [
+        ("Everywhere", [("1 … 5", "switch tabs (or click them)"), ("space", "pause / resume everything"),
+                        ("ctrl+p", "command palette (themes too)"), ("q", "quit (asks if something is running)")]),
+        ("Library", [("↑ ↓  → ←  Enter", "browse; Enter on an episode (or double-click) opens Encode"),
+                     ("/", "find any show, season or episode"),
+                     ("e", "encode the highlighted episode, season or show"),
+                     ("u", "put back the original of a file recast replaced"),
+                     ("R", "rescan the library (on the library line)")]),
+        ("Queue", [("x", "cancel the highlighted job"), ("r", "retry a failed job"),
+                   ("del", "clear finished jobs from the list"), ("f   [ ]", "frame preview on/off · refresh rate")]),
+        ("Approvals", [("y / n", "approve / deny"), ("r", "retry with different settings"),
+                       ("c", "compare frames: source vs encoded"),
+                       ("a / s", "in the pop-up: approve + rest of season / whole show")]),
+        ("Encode dialog", [("Enter", "start"), ("ctrl+a", "advanced settings"),
+                           ("click Bitrate / CRF", "switches rate control to it")]),
+        ("Preset editor", [("type", "suggestions pop up; Tab completes (quotes + commas included)"),
+                           ("↑↓ / ctrl+space", "choose / open suggestions"), ("ctrl+s", "save")]),
+    ]
 
     def compose(self) -> ComposeResult:
         t = Table(box=None, padding=(0, 2), show_header=False)
-        t.add_column(style="bold #7dcfff")
+        t.add_column(style="bold #7dcfff", no_wrap=True)
         t.add_column()
-        for k, d in [("1-5", "switch tabs (or click them)"), ("↑ ↓ ← → / mouse", "browse the library"),
-                     ("e", "encode the highlighted file, or a folder (try 1 file first, or all)"),
-                     ("/", "find a show / season / file in the library"),
-                     ("u", "restore the original of a file recast replaced (while it's in the trash)"), ("f", "toggle frame preview"),
-                     ("[  ]", "frame preview refresh rate"), ("space", "pause / resume everything"),
-                     ("x / r / del", "cancel · retry failed · clear finished (Queue)"),
-                     ("y / n / r", "approve / deny / retry in Approvals"),
-                     ("a / s", "in the approval prompt: approve + rest of season / whole show"),
-                     ("c", "compare frames (source vs encoded)"), ("ctrl+a", "advanced settings (encode dialog)"),
-                     ("tab / ↑↓ / ctrl+space", "accept / choose / open suggestions in the preset editor"),
-                     ("ctrl+s", "save preset (in the editor)"), ("ctrl+p", "command palette / themes"),
-                     ("q", "quit")]:
-            t.add_row(k, d)
+        for title, rows in self.SECTIONS:
+            t.add_row(Text(title, style="bold #bb9af7"), "")
+            for k, d in rows:
+                t.add_row("  " + k, d)
         with Vertical(id="help-box"):
-            yield Static(Text("recast — keys", style="bold"))
+            yield Static(Text("recast — keys  (the footer always shows the ones for the tab you're on)", style="bold"))
             yield Static(t)
 
 

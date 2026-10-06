@@ -652,7 +652,7 @@ class RecastApp(App):
                 infos[p] = m
             else:
                 todo.append(p)
-        self._scan = {"root": root, "phase": "reading", "done": 0, "total": len(todo)}
+        self._scan = {"root": root, "phase": "reading", "done": 0, "total": len(todo), "t0": time.monotonic()}
         self._publish_overview(root, entries, infos)
         if todo:
             from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -675,8 +675,22 @@ class RecastApp(App):
                     if i % 300 == 0:
                         self.probes.save()  # a quit halfway keeps what was read
             self.probes.save()
+        took = time.monotonic() - self._scan.get("t0", time.monotonic()) if self._scan else 0
         self._scan = None
         self._publish_overview(root, entries, infos)
+        top = next(iter(self.overview.get(root, [])), None)
+        if took > 20 and top and top.saves > 0:
+            call(self.notify, f"Biggest win: {top.name} — {top.best} saves ≈{fsize(top.saves)}.\n"
+                 "Highlight the library line to see the full ranking; e on a row encodes that show.",
+                 title="✓ Library scanned", timeout=12)
+            call(self.desktop, "Library scanned", f"Biggest win: {top.name} saves ≈{fsize(top.saves)}")
+
+    @staticmethod
+    def _scan_eta(sc: dict) -> str:
+        if not sc.get("t0") or sc["done"] < 30 or not sc["total"]:
+            return ""
+        rate = sc["done"] / max(1e-3, time.monotonic() - sc["t0"])
+        return f" · ~{fdur((sc['total'] - sc['done']) / rate)} left"
 
     def _publish_overview(self, root: str, entries, infos) -> None:
         stats = rank(root, entries, infos, self.presets, self.cfg.encoders, self.engine.done_paths(),
@@ -706,8 +720,9 @@ class RecastApp(App):
         if sc and sc["phase"] == "listing":
             head.append(Text(f"◐ listing your library… {sc['done']:,} video files so far", style="#e0af68"))
         elif sc:
-            head.append(Text(f"◐ reading file headers {sc['done']:,}/{sc['total']:,} (first time only — cached after "
-                             "this; the table fills in as it goes)", style="#e0af68"))
+            head.append(Text(f"◐ reading file headers {sc['done']:,}/{sc['total']:,}{self._scan_eta(sc)} — first time "
+                             "only, cached after this; the table fills in as it goes and you can keep using recast",
+                             style="#e0af68"))
         if stats:
             total = sum(s.size for s in stats)
             saves = sum(s.saves for s in stats)
@@ -717,8 +732,9 @@ class RecastApp(App):
             head.append(Text.assemble(("Biggest wins", "bold"), f"  ·  {len(stats)} shows · {n:,} files · {fsize(total)}",
                                       ("  ·  best case saves ", "dim"), (f"≈{fsize(saves)}", "bold #9ece6a"),
                                       (f"  ·  {age} · R rescans", "dim")))
-            head.append(Text("Each row uses the preset that frees the most for that show (measured ones are from your "
-                             "real encodes). Enter or click a row to jump to it.", style="dim"))
+            head.append(Text("Each row uses the preset that frees the most for that show (·m = measured from your "
+                             "real encodes). Enter/click jumps to the show · e encodes it with that preset.",
+                             style="dim"))
         elif not sc:
             head.append(Text("No video files found here.", style="dim"))
         self._set_details(Group(*head))
@@ -950,6 +966,13 @@ class RecastApp(App):
 
     # ── encode flow ──
     def action_encode(self) -> None:
+        wins = self.query_one("#wins", DataTable)
+        if self.focused is wins and wins.row_count:  # from the biggest-wins table: that show, its best preset
+            key = wins.coordinate_to_cell_key(wins.cursor_coordinate).row_key.value
+            st = self.show_stats.get(norm(key))
+            best = st.best if st and st.best in self.presets else None
+            self.start_encode(key, True, self.presets[best][1] if best else None, best)
+            return
         if self.query_one("#tabs", TabbedContent).active != "tab-library":
             self.action_tab("tab-library")
             self.query_one("#lib-tree").focus()
@@ -1887,7 +1910,8 @@ class RecastApp(App):
         if self._scan:
             t.append(" │ ", "dim")
             sc = self._scan
-            t.append(f"◐ scanning {sc['done']:,}" + (f"/{sc['total']:,}" if sc["total"] else ""), "#e0af68")
+            t.append(f"◐ scanning {sc['done']:,}" + (f"/{sc['total']:,}" if sc["total"] else "") + self._scan_eta(sc),
+                     "#e0af68")
         if self.engine.hold:
             t.append(" │ ", "dim")
             t.append("❚❚ queue paused (space)", "bold #e0af68")

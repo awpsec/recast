@@ -4,8 +4,13 @@ A terminal app for re-encoding a Plex / Sonarr / Radarr library with ffmpeg, saf
 encode one file or a whole season, watch it happen, then approve before anything in
 your library changes.
 
-- **Browse the library** (arrows, mouse, `/` to find; it reopens where you left off) and see
-  codec, bitrate, tracks and Sonarr/Radarr info for any file or folder.
+- **Find your biggest wins**: highlight a library folder and recast scans it in the
+  background (headers only, cached), then ranks every show by how much space its best
+  preset would free. `e` on a row encodes that show; show folders in the tree get their
+  size and potential saving next to the name.
+- **Browse the library** (arrows, mouse; it reopens where you left off) and see codec,
+  bitrate, tracks and Sonarr/Radarr info for any file or folder. `/` is a quick-open
+  that searches every show, season and episode.
 - **See what every preset would do** to that file, season or show: files, size after,
   % saved. Once you've encoded something from a show, the numbers are *measured* from
   your real results instead of estimated.
@@ -69,8 +74,8 @@ sudo apt install jellyfin-ffmpeg7 && sudo usermod -aG render $USER
 uv tool install /path/to/recast
 ```
 
-Then run `recast`. The first launch detects your hardware, asks for your library folder
-(e.g. `/Volumes/media`, `M:\`, `/mnt/nas/media`) and a scratch folder
+Then run `recast`. The first launch detects your hardware, suggests the media folders on
+your mounted drives/shares (pick one or several, e.g. `…/tv` and `…/movies`) and a scratch folder
 (default `~/Documents/recast`, i.e. `C:\Users\<you>\Documents\recast`), and you're done.
 Re-run detection any time from Settings or with `recast --setup`.
 
@@ -82,8 +87,9 @@ Re-run detection any time from Settings or with `recast --setup`.
 | key | |
 |---|---|
 | `1`–`5` | Library · Queue · Approvals · Presets · Settings (or click) |
-| `/` | find a show / season / file |
-| `e` | encode the highlighted file or folder |
+| `/` | find any show / season / episode |
+| `e`, Enter, double-click | encode the highlighted episode (or folder with `e`) |
+| `R` | rescan the library (on the library line) |
 | `u` | restore the original of a file recast replaced |
 | `f`, `[` `]` | frame preview on/off, refresh rate |
 | `space` | pause / resume everything |
@@ -93,7 +99,7 @@ Re-run detection any time from Settings or with `recast --setup`.
 | `ctrl+a` | advanced settings in the encode dialog |
 | `tab` `↑↓` `ctrl+space` | accept / choose / open suggestions in the preset editor |
 | `ctrl+s` | save preset |
-| `?` | help |
+| `?` | help (the footer always shows the keys for the current tab) |
 
 ## Where things live
 

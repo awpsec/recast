@@ -20,13 +20,15 @@ from textual.widgets import (Button, DataTable, Footer, Input, Label, ListItem, 
 
 from ..arr import ArrClient, ArrError, ArrIndex, auto_map
 from ..config import Config, Root, is_network_path
-from ..encode import (CODEC_LABEL, EncodeSettings, already_target, delete_preset, est_bytes, load_presets, skip_reason,
+from ..encode import (CODEC_LABEL, EncodeSettings, already_target, delete_preset, est_bytes, est_fps, load_presets,
+                      skip_reason, two_pass,
                       preset_doc, resolve_encoder, save_preset)
 from ..engine import ACTIVE, LIVE, Batch, Engine, Job, norm, show_root
+from ..overview import ShowStat, list_files, load_snapshot, rank, save_snapshot
 from ..probe import VIDEO_EXT, MediaInfo, ProbeCache
 from .editor import PresetEditor
 from .frames import FrameView, load_image
-from .screens import (ApprovalPrompt, CompareScreen, ConfirmScreen, EncodeDialog, HelpScreen, NamePrompt,
+from .screens import (ApprovalPrompt, CompareScreen, ConfirmScreen, EncodeDialog, FindScreen, HelpScreen, NamePrompt,
                       SetupScreen, compare_table)
 from .style import CODEC_STYLE, badge, fdur, fsize, pct_bar
 
@@ -101,6 +103,14 @@ def _ago(ts: float) -> str:
     return time.strftime("since %a %H:%M", time.localtime(ts))
 
 
+def _mid(name: str, width: int) -> str:
+    """Shorten from the middle: the end is where SxxEyy, quality and codec live."""
+    if len(name) <= width:
+        return name
+    tail = max(8, width * 3 // 5)
+    return name[:width - tail - 1] + "…" + name[-tail:]
+
+
 def _short(path: str) -> str:
     parts = path.replace("\\", "/").rstrip("/").split("/")
     return " / ".join(parts[-2:])
@@ -109,23 +119,28 @@ def _short(path: str) -> str:
 class RecastApp(App):
     TITLE = "recast"
     CSS_PATH = "app.tcss"
+    # screens get -narrow/-normal/-wide and -short/-tall classes; app.tcss adapts the layout
+    HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (112, "-normal"), (170, "-wide")]
+    VERTICAL_BREAKPOINTS = [(0, "-short"), (36, "-tall")]
+    # Every binding is shown in the footer only on the tab where it does something (see check_action).
     BINDINGS = [
         Binding("e", "encode", "Encode…"),
         Binding("slash", "jump", "Find"),
+        Binding("u", "restore", "Restore original"),
+        Binding("R", "rescan", "Rescan library"),
+        Binding("y", "approve", "Approve"),
+        Binding("n", "deny", "Deny"),
+        Binding("r", "retry", "Retry"),
+        Binding("c", "compare", "Compare frames"),
+        Binding("x", "cancel_job", "Cancel"),
+        Binding("delete", "clear_finished", "Clear finished"),
         Binding("f", "toggle_frame", "Frame preview"),
-        Binding("space", "pause", "Pause"),
-        Binding("question_mark", "help", "Help"),
-        Binding("q", "quit_app", "Quit"),
         Binding("left_square_bracket", "cadence(-1)", "Slower", show=False),
         Binding("right_square_bracket", "cadence(1)", "Faster", show=False),
-        Binding("x", "cancel_job", "Cancel job", show=False),
-        Binding("y", "approve", "Approve", show=False),
-        Binding("n", "deny", "Deny", show=False),
-        Binding("r", "retry", "Retry", show=False),
-        Binding("c", "compare", "Compare", show=False),
-        Binding("ctrl+s", "save_preset", "Save preset", show=False),
-        Binding("delete", "clear_finished", "Clear finished", show=False),
-        Binding("u", "restore", "Restore original", show=False),
+        Binding("ctrl+s", "save_preset", "Save preset"),
+        Binding("space", "pause", "Pause/resume all"),
+        Binding("question_mark", "help", "Help"),
+        Binding("q", "quit_app", "Quit"),
         *[Binding(str(i + 1), f"tab('{t}')", show=False) for i, t in
           enumerate(["tab-library", "tab-queue", "tab-approvals", "tab-presets", "tab-settings"])],
     ]
@@ -145,6 +160,11 @@ class RecastApp(App):
         self._inbox_sig: tuple = ()
         self._copy_rate: dict[int, tuple[float, int, float]] = {}
         self._tree_status: dict[str, str] = {}
+        self._tree_w = 80
+        self.overview: dict[str, list[ShowStat]] = {}   # root → ranked shows
+        self.show_stats: dict[str, ShowStat] = {}       # show folder → stats (tree badges)
+        self._scan: dict | None = None                  # progress of a running library scan
+        self._quick_dirs: dict[str, list[str]] = {}
         self._ticks = 0
 
     # ── layout ──
@@ -157,6 +177,7 @@ class RecastApp(App):
                     with Vertical(id="lib-right"):
                         with VerticalScroll(id="details-scroll", classes="pane"):
                             yield Static(id="details")
+                            yield DataTable(id="wins", cursor_type="row", zebra_stripes=True)
                         with Horizontal(id="lib-actions"):
                             yield Button("▶ Encode…  e", id="btn-encode", variant="primary")
                             yield Button("↻ Refresh", id="btn-refresh")
@@ -287,11 +308,13 @@ class RecastApp(App):
         self.query_one("#details-scroll").border_title = "Details"
         jobs = self.query_one("#jobs", DataTable)
         jobs.border_title = "Jobs"
-        for label, key, w in [("#", "id", 4), ("File", "file", 40), ("Preset", "preset", 24), ("Stage", "stage", 21),
-                              ("Progress", "prog", 16), ("FPS", "fps", 6), ("Size", "size", 22), ("ETA", "eta", 9)]:
+        W = self.size.width or 120
+        name_w = max(22, min(44, W - 110))
+        for label, key, w in [("#", "id", 3), ("File", "file", name_w), ("Preset", "preset", 20 if W >= 140 else 12),
+                              ("Stage", "stage", 20), ("Progress", "prog", 15), ("FPS", "fps", 4),
+                              ("Size", "size", 17), ("ETA", "eta", 8)]:
             jobs.add_column(label, key=key, width=w)
         self.query_one("#job-detail").border_title = "Job"
-        self.query_one("#job-detail").border_subtitle = "space pause all · x cancel · r retry · del clear finished"
         self.query_one("#frame-panel").border_title = "Frame preview  f"
         self.query_one("#appr-list").border_title = "Awaiting approval"
         self.query_one("#appr-scroll").border_title = "Review"
@@ -314,6 +337,18 @@ class RecastApp(App):
             self._saved_last_path = self.cfg.last_path
             self.cfg.save()
 
+    def on_resize(self, event) -> None:
+        self.call_after_refresh(self._measure_tree)
+
+    def _measure_tree(self) -> None:
+        try:
+            self._tree_w = self.query_one("#lib-tree").size.width or self._tree_w
+            d = self.current_node()
+            if d and self.is_root(d.path):
+                self.render_overview(d.root.path)  # re-fit the wins table to the new width
+        except Exception:
+            pass
+
     def after_setup(self, ok: bool | None) -> None:
         if ok:
             self.notify(f"Ready. HEVC here uses {resolve_encoder(EncodeSettings(), self.cfg.encoders)[0]}.",
@@ -321,11 +356,17 @@ class RecastApp(App):
             self.start()
 
     def start(self) -> None:
+        self._measure_tree()
         self.probes = ProbeCache(self.cfg.ffprobe)
         self.query_one("#preset-editor", PresetEditor).caps = self.cfg.encoders
         self.build_tree()
         if self.cfg.last_path and os.path.exists(self.cfg.last_path):
             self.run_worker(self.reveal(self.cfg.last_path), group="reveal")
+        else:
+            self._set_details(self.welcome())
+        for r in self.cfg.roots:
+            if not load_snapshot(r.path):
+                self.list_quick_dirs(r.path)  # so Find works before the first scan
         self.refresh_settings()
         self.refresh_presets()
         self.refresh_inbox(force=True)
@@ -365,7 +406,7 @@ class RecastApp(App):
         tree.show_root = False
         tree.guide_depth = 3
         for r in self.cfg.roots:
-            label = Text.assemble((r.name, "bold"), (f"  {r.path}", "dim"),
+            label = Text.assemble((r.name, "bold"),
                                   ("  ⇄ network" if r.remote else "  local", "#7dcfff" if r.remote else "dim"))
             n = tree.root.add(label, data=Node("dir", r.path, r), expand=False)
             if not os.path.isdir(r.path):
@@ -412,7 +453,7 @@ class RecastApp(App):
         cur = tree.cursor_node.data.path if tree.cursor_node and isinstance(tree.cursor_node.data, Node) else None
         node.remove_children()
         for p in dirs:
-            node.add(Text(os.path.basename(p)), data=Node("dir", p, d.root), allow_expand=True)
+            node.add(self.folder_label(p), data=Node("dir", p, d.root), allow_expand=True)
         for p, size in files:
             node.add_leaf(self.file_label(p, size, cached.get(p)), data=Node("file", p, d.root, size=size))
         if getattr(d, "refreshing", False):
@@ -431,10 +472,9 @@ class RecastApp(App):
         key = norm(path)
         st = self._tree_status.get(key, "")
         mark = {"done": ("✓ ", "#9ece6a"), "busy": ("● ", "#e0af68"), "wait": ("⚑ ", "#bb9af7")}.get(st, ("  ", ""))
-        name = os.path.basename(path)
-        if len(name) > 42:  # keep the end: that's where SxxEyy and quality live
-            name = name[:16] + "…" + name[-25:]
-        t = Text.assemble(mark, name.ljust(43))
+        width = max(24, min(60, self._tree_w - 28))
+        name = _mid(os.path.basename(path), width)
+        t = Text.assemble(mark, name.ljust(width + 1))
         if m:
             t.append_text(badge(m.codec))
             t.append(f" {m.res:>5}", "dim")
@@ -454,8 +494,15 @@ class RecastApp(App):
 
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
         d = event.node.data
+        self.refresh_bindings()
         if isinstance(d, Node):
-            self.show_details(d, event.node)
+            wins = self.query_one("#wins", DataTable)
+            if self.is_root(d.path):
+                wins.display = True
+                self.open_overview(d.root)
+            else:
+                wins.display = False
+                self.show_details(d, event.node)
             if not getattr(self, "_revealing", False):
                 self.cfg.last_path = d.path
 
@@ -533,6 +580,187 @@ class RecastApp(App):
                     if len(out) >= limit:
                         return out
         return out
+
+    def is_root(self, path: str) -> bool:
+        return any(norm(r.path) == norm(path) for r in self.cfg.roots)
+
+    # ── library overview: biggest wins ──
+    def open_overview(self, root: Root, force: bool = False) -> None:
+        self.render_overview(root.path)
+        snap = load_snapshot(root.path)
+        fresh = snap and time.time() - snap["when"] < 86400
+        running = self._scan and self._scan["root"] == root.path
+        if not running and (force or not fresh or root.path not in self.overview):
+            self.scan_library(root.path, force or not fresh)
+
+    def action_rescan(self) -> None:
+        d = self.current_node()
+        if d and self.is_root(d.path):
+            self.open_overview(d.root, force=True)
+
+    @work(thread=True, group="scan", exclusive=True)
+    def scan_library(self, root: str, relist: bool) -> None:
+        worker = get_current_worker()
+        call = self.call_from_thread
+        snap = None if relist else load_snapshot(root)
+        if snap:
+            entries = [tuple(e) for e in snap["files"]]
+        else:
+            self._scan = {"root": root, "phase": "listing", "done": 0, "total": 0}
+            call(self.render_overview, root)
+            last = [0.0]
+
+            def listed(n):
+                if time.monotonic() - last[0] > 0.5:
+                    last[0] = time.monotonic()
+                    self._scan["done"] = n
+                    call(self.render_overview, root)
+            entries = list_files(root, listed, lambda: worker.is_cancelled)
+            if worker.is_cancelled:
+                self._scan = None
+                return
+            save_snapshot(root, entries)
+        infos = {}
+        todo = []
+        for p, size, mtime in entries:
+            m = self.probes.cached_meta(p, size, mtime)
+            if m:
+                infos[p] = m
+            else:
+                todo.append(p)
+        self._scan = {"root": root, "phase": "reading", "done": 0, "total": len(todo)}
+        self._publish_overview(root, entries, infos)
+        if todo:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            last = time.monotonic()
+            with ThreadPoolExecutor(max_workers=6) as pool:  # headers only; a few at a time is kind to the NAS
+                futs = {pool.submit(self.probes.get, p): p for p in todo}
+                for i, f in enumerate(as_completed(futs), 1):
+                    if worker.is_cancelled:
+                        for x in futs:
+                            x.cancel()
+                        self._scan = None
+                        return
+                    m = f.result()
+                    if not m.error:
+                        infos[futs[f]] = m
+                    self._scan["done"] = i
+                    if time.monotonic() - last > 3:
+                        last = time.monotonic()
+                        self._publish_overview(root, entries, infos)
+                    if i % 300 == 0:
+                        self.probes.save()  # a quit halfway keeps what was read
+            self.probes.save()
+        self._scan = None
+        self._publish_overview(root, entries, infos)
+
+    def _publish_overview(self, root: str, entries, infos) -> None:
+        stats = rank(root, entries, infos, self.presets, self.cfg.encoders, self.engine.done_paths(),
+                     self.engine.measured, self._title_of(root))
+        self.overview[root] = stats
+        self.show_stats.update({norm(s.path): s for s in stats})
+        self.call_from_thread(self.render_overview, root)
+        self.call_from_thread(self.badge_tree)
+
+    def _title_of(self, root: str):
+        nroot = norm(root)
+
+        def title(path: str) -> str:
+            t = show_root(path)
+            return t if norm(t).startswith(nroot) else root
+        return title
+
+    def render_overview(self, root: str) -> None:
+        d = self.current_node()
+        if not d or norm(d.path) != norm(root):
+            return
+        r = next((x for x in self.cfg.roots if norm(x.path) == norm(root)), None)
+        stats = self.overview.get(root, [])
+        head = [Text.assemble((r.name if r else root, "bold #c0caf5"), ("  " + root, "#9ece6a")),
+                Text("network share" if r and r.remote else "local disk", style="dim"), Text("")]
+        sc = self._scan if self._scan and self._scan["root"] == root else None
+        if sc and sc["phase"] == "listing":
+            head.append(Text(f"◐ listing your library… {sc['done']:,} video files so far", style="#e0af68"))
+        elif sc:
+            head.append(Text(f"◐ reading file headers {sc['done']:,}/{sc['total']:,} (first time only — cached after "
+                             "this; the table fills in as it goes)", style="#e0af68"))
+        if stats:
+            total = sum(s.size for s in stats)
+            saves = sum(s.saves for s in stats)
+            n = sum(s.files for s in stats)
+            snap = load_snapshot(root)
+            age = _ago(snap["when"]).replace("since", "listed") if snap else ""
+            head.append(Text.assemble(("Biggest wins", "bold"), f"  ·  {len(stats)} shows · {n:,} files · {fsize(total)}",
+                                      ("  ·  best case saves ", "dim"), (f"≈{fsize(saves)}", "bold #9ece6a"),
+                                      (f"  ·  {age} · R rescans", "dim")))
+            head.append(Text("Each row uses the preset that frees the most for that show (measured ones are from your "
+                             "real encodes). Enter or click a row to jump to it.", style="dim"))
+        elif not sc:
+            head.append(Text("No video files found here.", style="dim"))
+        self._set_details(Group(*head))
+        t = self.query_one("#wins", DataTable)
+        avail = max(30, (self.query_one("#details-scroll").size.width or 80) - 6)
+        mode = "wide" if avail >= 112 else "mid" if avail >= 66 else "narrow"
+        cols = {"wide": (("show", "Show", avail - 78), ("size", "Size", 9), ("files", "Files", 6),
+                         ("codecs", "Codecs", 16), ("preset", "Best preset", 26), ("saves", "Saves", 15)),
+                "mid": (("show", "Show", avail - 50), ("size", "Size", 9), ("preset", "Best preset", 22),
+                        ("saves", "Saves", 15)),
+                "narrow": (("show", "Show", avail - 16), ("saves", "Saves", 14))}[mode]
+        if getattr(self, "_wins_mode", None) != (mode, avail):
+            self._wins_mode = (mode, avail)
+            t.clear(columns=True)
+            for key, label, w in cols:
+                t.add_column(label, key=key, width=max(8, w))
+        t.clear()
+        for s in stats[:300]:
+            codecs = Text()
+            for c, b in sorted(s.codecs.items(), key=lambda kv: -kv[1])[:3]:
+                codecs.append_text(badge(c))
+                codecs.append(" ")
+            pct = s.saves / max(1, s.size)
+            saves = Text(f"{fsize(s.saves)} {-pct * 100:.0f}%" if s.saves > 0 else "—",
+                         style="bold #9ece6a" if pct >= 0.3 else "#9ece6a" if s.saves > 0 else "dim")
+            name = Text(s.name + (" ✓" * bool(s.done)), style="" if s.saves > 0 else "dim", no_wrap=True,
+                        overflow="ellipsis")
+            cells = {"show": name, "size": fsize(s.size), "files": str(s.files), "codecs": codecs,
+                     "preset": Text((s.best or "nothing to gain") + (" ·m" if s.measured else ""),
+                                    style="#e0af68" if s.best else "dim", no_wrap=True, overflow="ellipsis"),
+                     "saves": saves}
+            t.add_row(*(cells[k] for k, _, _ in cols), key=s.path)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id == "wins" and event.row_key is not None:
+            self.query_one("#wins", DataTable).display = False
+            self.run_worker(self.reveal(event.row_key.value), group="reveal")
+            self.query_one("#lib-tree").focus()
+
+    def badge_tree(self) -> None:
+        """Show size + potential saving next to show folders in the tree."""
+        for node in self.query_one("#lib-tree", Tree)._tree_nodes.values():
+            d = node.data
+            if isinstance(d, Node) and d.kind == "dir" and norm(d.path) in self.show_stats:
+                node.set_label(self.folder_label(d.path))
+
+    def folder_label(self, path: str) -> Text:
+        t = Text(os.path.basename(path.rstrip("/\\")))
+        s = self.show_stats.get(norm(path))
+        if s:
+            t.append(f"  {fsize(s.size)}", "dim")
+            if s.saves >= 1024**3:
+                t.append(f"  save ≈{fsize(s.saves)}", "#9ece6a")
+        return t
+
+    def welcome(self) -> Text:
+        k = lambda x: (x, "bold #7dcfff")
+        return Text.assemble(
+            ("Welcome to recast\n\n", "bold #bb9af7"),
+            k("↑ ↓"), " or the mouse to browse · ", k("Enter / →"), " opens a folder · ", k("/"), " finds a show\n\n",
+            "Highlight a ", ("show or season", "bold"), " to see what every preset would save.\n",
+            "Highlight an ", ("episode", "bold"), " and press ", k("e"), " (or double-click) to encode it — when it's done "
+            "you can approve it and queue the rest of the season in one go.\n",
+            "Highlight the ", ("library", "bold"), " (top line) to rank every show by how much space it would free.\n\n",
+            ("Nothing in your library changes until you approve it, and originals stay in the trash so ", "dim"),
+            k("u"), (" can put them back.", "dim"))
 
     def _set_details(self, r) -> None:
         self.query_one("#details", Static).update(r)
@@ -908,41 +1136,103 @@ class RecastApp(App):
                 self.load_dir(node)
 
     # ── actions ──
+    TAB_ACTIONS = {
+        "tab-library": {"encode", "jump", "restore", "rescan"},
+        "tab-queue": {"cancel_job", "retry", "clear_finished", "toggle_frame", "cadence"},
+        "tab-approvals": {"approve", "deny", "retry", "compare"},
+        "tab-presets": {"save_preset"},
+        "tab-settings": set(),
+    }
+    ANY_TAB = {"pause", "help", "quit_app", "tab"}
+
     def check_action(self, action: str, parameters) -> bool | None:
         if len(self.screen_stack) > 1 and action not in ("quit_app",):
             return False
-        if isinstance(self.focused, (Input, PresetEditor)) and action in (
-                "encode", "jump", "restore", "toggle_frame", "pause", "cancel_job", "approve", "deny", "retry", "compare",
-                "cadence", "tab", "quit_app", "help"):
+        if isinstance(self.focused, (Input, PresetEditor)) and action != "save_preset":
+            return False  # typing: letters are text, not shortcuts
+        try:
+            tab = self.query_one("#tabs", TabbedContent).active
+        except Exception:
+            return True
+        if action in self.ANY_TAB:
+            return True
+        if action not in self.TAB_ACTIONS.get(tab, set()):
             return False
+        if action in ("toggle_frame", "cadence") and self.screen.has_class("-narrow"):
+            return False  # the frame panel is hidden at this width anyway
+        if action == "rescan":
+            d = self.current_node()
+            return bool(d and self.is_root(d.path))
+        if action == "restore":  # only meaningful on a file recast replaced
+            d = self.current_node()
+            return bool(d and d.kind == "file" and self.engine.record_for(d.path))
+        if action in ("cancel_job", "retry") and tab == "tab-queue":
+            j = self.selected_job
+            ok = j is not None and (j.stage in ACTIVE if action == "cancel_job" else j.stage in ("failed", "cancelled"))
+            return True if ok else None  # greyed out when it can't apply to the highlighted job
+        if action in ("approve", "deny", "retry", "compare"):
+            return True if self.highlighted_item() is not None else None
         return True
 
+    def on_click(self, event) -> None:
+        """Double-click a file in the library to encode it."""
+        if getattr(event, "chain", 1) == 2 and getattr(event.widget, "id", "") == "lib-tree":
+            d = self.current_node()
+            if d and d.kind == "file":
+                self.action_encode()
+
     def action_jump(self) -> None:
-        def go(q: str | None) -> None:
-            if not q:
-                return
-            tree = self.query_one("#lib-tree", Tree)
-            ql = q.lower()
-            start = tree.cursor_node
-            nodes = [n for n in tree._tree_nodes.values() if isinstance(n.data, Node)]
-            nodes.sort(key=lambda n: n.line if n.line >= 0 else 10**9)
-            hits = [n for n in nodes if ql in os.path.basename(n.data.path).lower()]
-            if not hits:
-                self.notify(f"Nothing loaded matches “{q}” (expand a folder to search inside it).",
-                            severity="warning")
-                return
-            after = [n for n in hits if start is None or n.line > start.line]
-            n = (after or hits)[0]
-            n.expand() if n.data.kind == "dir" else None
-            p = n.parent
-            while p is not None:
-                p.expand()
-                p = p.parent
-            self.call_after_refresh(tree.move_cursor, n)
-            self.call_after_refresh(tree.scroll_to_node, n)
-            tree.focus()
         self.action_tab("tab-library")
-        self.push_screen(NamePrompt("Find in library (show, season, file…)", "e.g. law & order"), go)
+        corpus, partial = self.search_corpus()
+
+        def go(path: str | None) -> None:
+            if path:
+                self.query_one("#wins", DataTable).display = False
+                self.run_worker(self.reveal(path), group="reveal")
+                self.query_one("#lib-tree").focus()
+        self.push_screen(FindScreen(corpus, partial), go)
+
+    def search_corpus(self) -> tuple[list[tuple[str, bool, str]], bool]:
+        """Everything findable: every file + folder from the last library scan, else show/season folders."""
+        out: dict[str, tuple[str, bool, str]] = {}
+        partial = False
+        for r in self.cfg.roots:
+            snap = load_snapshot(r.path)
+            if snap:
+                for p, _size, _mtime in snap["files"]:
+                    rel = os.path.relpath(p, r.path)
+                    out[p] = (p, False, rel)
+                    d = os.path.dirname(p)
+                    while norm(d) != norm(r.path) and d not in out and len(d) > len(r.path):
+                        out[d] = (d, True, os.path.relpath(d, r.path))
+                        d = os.path.dirname(d)
+            else:
+                partial = True
+                for d in self._quick_dirs.get(r.path, []):
+                    out[d] = (d, True, os.path.relpath(d, r.path))
+                if r.path not in self._quick_dirs:
+                    self.list_quick_dirs(r.path)
+        for node in self.query_one("#lib-tree", Tree)._tree_nodes.values():  # whatever is already loaded
+            dd = node.data
+            if isinstance(dd, Node) and dd.path not in out and not self.is_root(dd.path):
+                out[dd.path] = (dd.path, dd.kind == "dir", os.path.relpath(dd.path, dd.root.path))
+        return list(out.values()), partial
+
+    @work(thread=True, group="quickdirs")
+    def list_quick_dirs(self, root: str) -> None:
+        """Before a full scan: show + season folder names (two levels), so Find works right away."""
+        found = []
+        try:
+            for a in os.scandir(root):
+                if a.is_dir() and not a.name.startswith((".", "@", "#")):
+                    found.append(a.path)
+                    try:
+                        found += [b.path for b in os.scandir(a.path) if b.is_dir() and not b.name.startswith((".", "@"))]
+                    except OSError:
+                        pass
+        except OSError:
+            return
+        self._quick_dirs[root] = found
 
     def action_tab(self, tab: str) -> None:
         self.query_one("#tabs", TabbedContent).active = tab
@@ -1471,7 +1761,7 @@ class RecastApp(App):
         else:
             sz = Text(fsize(size), style="dim")
         eta = fdur((j.info.get("duration", 0) - j.out_time) / j.speed) if j.stage == "encoding" and j.speed else ""
-        name = Text.assemble(("▤ " if j.batch else "  ", "#bb9af7"), j.name[:36])
+        name = Text.assemble(("▤ " if j.batch else "  ", "#bb9af7"), _mid(j.name, 42))
         stage = Text(label, style=style)
         if j.flag and j.stage == "awaiting":
             stage = Text("⚑ flagged", style="bold #e0af68")
@@ -1480,6 +1770,7 @@ class RecastApp(App):
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.data_table.id == "jobs" and event.row_key is not None:
             self.selected_job = self.engine.jobs.get(int(event.row_key.value))
+            self.refresh_bindings()
             self.update_job_detail()
             self.update_frame()
 
@@ -1524,6 +1815,8 @@ class RecastApp(App):
         self.update_topbar()
         tab = self.query_one("#tabs", TabbedContent).active
         if tab == "tab-queue":
+            if self._ticks % 4 == 0:
+                self.update_queue_title()
             self.update_job_detail()
         elif tab == "tab-approvals" and self._ticks % 4 == 0:
             self.refresh_inbox()
@@ -1540,6 +1833,11 @@ class RecastApp(App):
         t.append(f"{self.cfg.machine.get('host', '')} ", "bold #c0caf5")
         t.append(resolve_encoder(EncodeSettings(), self.cfg.encoders)[0], "#7dcfff")
         t.append(" │ ", "dim")
+        saved = sum(h["src_size"] - h["out_size"] for h in self.engine.history if not h.get("restored"))
+        if saved > 0:
+            t.append("saved ", "dim")
+            t.append(fsize(saved), "bold #9ece6a")
+            t.append(" │ ", "dim")
         held = self.engine.held_bytes()
         t.append("scratch ", "dim")
         t.append(fsize(held), "#f7768e" if held > self.cfg.max_scratch_gb * 1024**3 * 0.8 else "#9ece6a")
@@ -1548,6 +1846,10 @@ class RecastApp(App):
             for kind in self.arr.clients:
                 ok = kind not in self.arr.errors
                 t.append(f"{'●' if ok else '○'} {kind} ", "#9ece6a" if ok else "#f7768e")
+        if self._scan:
+            t.append(" │ ", "dim")
+            sc = self._scan
+            t.append(f"◐ scanning {sc['done']:,}" + (f"/{sc['total']:,}" if sc["total"] else ""), "#e0af68")
         if self.engine.hold:
             t.append(" │ ", "dim")
             t.append("❚❚ queue paused (space)", "bold #e0af68")
@@ -1568,9 +1870,31 @@ class RecastApp(App):
                          f"{enc.phase + ' ' if enc.phase else ''}{enc.progress * 100:.0f}% {enc.fps:.0f}fps", "#e0af68")
         self.query_one("#topbar", Static).update(t)
 
+    def update_queue_title(self) -> None:
+        todo = [j for j in self.engine.jobs.values() if j.stage in ACTIVE]
+        tbl = self.query_one("#jobs", DataTable)
+        if not todo:
+            done = sum(1 for j in self.engine.jobs.values() if j.stage in ("replaced", "kept"))
+            tbl.border_title = "Jobs" + (f" · {done} done" if done else "")
+            return
+        live = next((j for j in todo if j.stage in LIVE and j.speed), None)
+        secs = 0.0
+        for j in todo:
+            dur = j.info.get("duration", 0)
+            left = dur - (j.out_time if j.stage in LIVE else 0)
+            speed = live.speed if live else (est_fps(j.s, j.media, self.cfg.encoders) / max(1.0, j.info.get("fps", 24)))
+            secs += left / max(0.05, speed) * (1.8 if two_pass(j.s, resolve_encoder(j.s, self.cfg.encoders)[0]) else 1)
+        tbl.border_title = f"Jobs · {len(todo)} to go · ≈{fdur(secs)} left" + (" · paused" if self.engine.hold else "")
+
     def update_job_detail(self) -> None:
         j = self.selected_job
         if not j:
+            if not self.engine.jobs:
+                self.query_one("#jd-title", Static).update(Text.assemble(
+                    ("Nothing queued yet.\n\n", "bold"),
+                    "Go to ", ("Library", "bold #7dcfff"), " (press 1), highlight an episode, season or show, and press ",
+                    ("e", "bold #7dcfff"), ".\nEncodes show up here with live progress and the frame being encoded."))
+                self.query_one("#jd-pipeline", Static).update("")
             return
         m = j.info
         title = Text.assemble((f"#{j.id}  ", "dim"), (j.name, "bold #c0caf5"), "  ", badge(m.get("codec", "?")), " → ",
@@ -1658,6 +1982,7 @@ class RecastApp(App):
         cap.update(t)
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        self.refresh_bindings()
         if event.pane.id == "tab-queue":
             if not self.selected_job and self.engine.jobs:
                 self.selected_job = max(self.engine.jobs.values(), key=lambda j: j.id)

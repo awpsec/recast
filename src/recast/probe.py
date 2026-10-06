@@ -152,6 +152,11 @@ class ProbeCache:
             return None
         return MediaInfo(**raw) if raw else None
 
+    def cached_meta(self, path: str, size: int, mtime: float) -> MediaInfo | None:
+        """Cache lookup with size/mtime we already know (no stat over the network)."""
+        raw = self._data.get(f"v3|{path}|{size}|{int(mtime)}")
+        return MediaInfo(**raw) if raw else None
+
     def get(self, path: str) -> MediaInfo:
         """Probe (blocking; call from a thread). Reads only container headers, not the whole file."""
         hit = self.cached(path)

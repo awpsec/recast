@@ -14,7 +14,8 @@ from textual.binding import Binding
 from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.suggester import Suggester
-from textual.widgets import Button, Input, Label, Select, Static, Switch
+from textual.widgets import Button, Input, Label, OptionList, Select, Static, Switch
+from textual.widgets.option_list import Option
 
 from .. import ffmpeg as ff
 from ..config import Config, EncoderCap, Root, default_scratch, is_network_path, machine_summary
@@ -25,6 +26,10 @@ from .frames import FrameView, grab_frame, side_by_side
 from .style import badge, fdur, fsize
 
 WIN = sys.platform == "win32"
+
+
+def norm_path(p: str) -> str:
+    return os.path.normcase(os.path.abspath(p))
 
 
 class PathSuggester(Suggester):
@@ -62,6 +67,8 @@ class SetupScreen(ModalScreen):
         self.caps: dict[str, EncoderCap] = {}
         self.lines: list[Text] = []
         self.done = False
+        self.found: list[tuple[str, bool]] = []
+        self.picked: list[str] = [r.path for r in cfg.roots]
 
     def compose(self) -> ComposeResult:
         root = self.cfg.roots[0] if self.cfg.roots else None
@@ -71,6 +78,8 @@ class SetupScreen(ModalScreen):
             with VerticalScroll(id="setup-scroll"):
                 yield Static(id="setup-log")
                 yield Static("── Library ─────────────────────────────────────", classes="section")
+                yield Static(id="su-found", classes="hint")
+                yield Horizontal(id="su-picks")
                 with Horizontal(classes="row"):
                     yield Label("Library folder", classes="lbl")
                     yield Input(root.path if root else "", placeholder=self._mount_hint(), id="su-path",
@@ -100,7 +109,41 @@ class SetupScreen(ModalScreen):
 
     def on_mount(self) -> None:
         self.detect()
+        self.find_libraries()
         self.query_one("#su-path", Input).focus()
+
+    @work(thread=True, group="find-libs")
+    def find_libraries(self) -> None:
+        from ..config import suggest_libraries
+        found = suggest_libraries()
+        self.app.call_from_thread(self._show_found, found)
+
+    def _show_found(self, found) -> None:
+        self.found = found
+        box = self.query_one("#su-picks", Horizontal)
+        box.remove_children()
+        if not found:
+            self.query_one("#su-found", Static).update(Text("Type your library folder below (Tab/→ completes paths).",
+                                                            style="dim"))
+            return
+        for i, (p, net) in enumerate(found):
+            box.mount(Button(("⇄ " if net else "") + p, id=f"pick{i}",
+                             variant="success" if p in self.picked else "default"))
+        self._update_picked()
+
+    def _update_picked(self) -> None:
+        t = Text("Found these — click to choose one or more:  ", style="dim")
+        if self.picked:
+            t.append("will add ", "dim")
+            t.append(", ".join(self.picked), "bold #9ece6a")
+        self.query_one("#su-found", Static).update(t)
+        for i, (p, _net) in enumerate(self.found):
+            try:
+                self.query_one(f"#pick{i}", Button).variant = "success" if p in self.picked else "default"
+            except Exception:
+                pass
+        if self.picked and not self.query_one("#su-path", Input).value.strip():
+            self.query_one("#su-path", Input).value = self.picked[0]
 
     def log_line(self, t: Text) -> None:
         self.lines.append(t)
@@ -175,7 +218,12 @@ class SetupScreen(ModalScreen):
                 info.update(Text("✗ folder doesn't exist (yet)", style="#f7768e"))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        bid = event.button.id
+        bid = event.button.id or ""
+        if bid.startswith("pick"):
+            p = self.found[int(bid[4:])][0]
+            self.picked.remove(p) if p in self.picked else self.picked.append(p)
+            self._update_picked()
+            return
         if bid == "su-rerun":
             self.detect()
         elif bid == "su-cancel":
@@ -183,7 +231,9 @@ class SetupScreen(ModalScreen):
         elif bid == "su-save":
             path = os.path.expanduser(self.query_one("#su-path", Input).value.strip())
             scratch = os.path.expanduser(self.query_one("#su-scratch", Input).value.strip())
-            if not os.path.isdir(path):
+            paths = list(dict.fromkeys([*self.picked, *([path] if path else [])]))
+            paths = [p for p in paths if os.path.isdir(p)]
+            if not paths:
                 self.app.notify("Pick an existing library folder.", severity="error")
                 return
             try:
@@ -191,10 +241,19 @@ class SetupScreen(ModalScreen):
             except OSError as e:
                 self.app.notify(f"Can't create scratch folder: {e}", severity="error")
                 return
-            root = Root(self.query_one("#su-name", Input).value.strip() or "Library", os.path.abspath(path),
-                        self.query_one("#su-remote", Switch).value)
-            others = [r for r in self.cfg.roots[1:] if r.path != root.path]
-            self.cfg.roots = [root, *others]
+            roots = []
+            for p in paths:
+                p = os.path.abspath(p)
+                if len(paths) == 1:
+                    name = self.query_one("#su-name", Input).value.strip() or "Library"
+                    remote = self.query_one("#su-remote", Switch).value
+                else:  # several picked: name them after share + folder, detect network each
+                    folder = p.rstrip("/\\")
+                    name = (os.path.basename(os.path.dirname(folder)) + " " + os.path.basename(folder)).strip()
+                    remote = is_network_path(p)
+                roots.append(Root(name, p, remote))
+            keep = [r for r in self.cfg.roots if norm_path(r.path) not in {norm_path(x.path) for x in roots}]
+            self.cfg.roots = [*roots, *[r for r in keep if r.path in self.picked]]
             self.cfg.scratch = os.path.abspath(scratch)
             self.cfg.encoders = self.caps
             self.cfg.detected_at = time.strftime("%Y-%m-%d %H:%M")
@@ -348,6 +407,7 @@ class EncodeDialog(ModalScreen):
         self.query_one("#enc-title", Static).update(self.title_text)
         self.update_preview()
         self.call_after_refresh(setattr, self, "_ready", True)
+        self.query_one("#go-preview", Button).focus()  # Enter = go; Tab/mouse to change settings
 
     def read(self) -> EncodeSettings:
         q = lambda i: self.query_one(f"#{i}")
@@ -777,3 +837,68 @@ class HelpScreen(ModalScreen):
         with Vertical(id="help-box"):
             yield Static(Text("recast — keys", style="bold"))
             yield Static(t)
+
+
+class FindScreen(ModalScreen):
+    """Quick-open: type part of a show / season / episode name, ↑↓ to choose, Enter to jump."""
+
+    BINDINGS = [Binding("escape", "dismiss(None)", "Close"), Binding("down", "move(1)", show=False),
+                Binding("up", "move(-1)", show=False)]
+
+    def __init__(self, corpus: list[tuple[str, bool, str]], partial: bool):
+        super().__init__()
+        self.corpus = corpus  # (path, is_dir, display path relative to its library)
+        self.partial = partial
+        self.hits: list[str] = []
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="find-box"):
+            yield Input(placeholder="find a show, season or episode…  (e.g. demon slayer, special 13, s13e15)",
+                        id="find-in")
+            yield OptionList(id="find-list")
+            yield Static(Text(("Only show & season folders are searchable until the library has been scanned "
+                               "(highlight the library line once). " if self.partial else "") +
+                              "↑↓ choose · Enter jump · Esc close", style="dim"), id="find-hint")
+
+    def on_mount(self) -> None:
+        self.query_one("#find-in", Input).focus()
+        self.refilter("")
+
+    def refilter(self, q: str) -> None:
+        words = q.lower().split()
+        ol = self.query_one("#find-list", OptionList)
+        ol.clear_options()
+        if not words:
+            self.hits = []
+            return
+        scored = []
+        for path, is_dir, rel in self.corpus:
+            low = rel.lower()
+            if all(w in low for w in words):
+                name = os.path.basename(rel).lower()
+                score = (0 if name.startswith(words[0]) else 1 if words[0] in name else 2, not is_dir, len(rel))
+                scored.append((score, path, is_dir, rel))
+        scored.sort(key=lambda x: x[0])
+        self.hits = [p for _, p, _, _ in scored[:30]]
+        for _, p, is_dir, rel in scored[:30]:
+            head, tail = os.path.split(rel)
+            ol.add_option(Option(Text.assemble(("▸ " if is_dir else "  ", "#7dcfff"), (tail, "bold" if is_dir else ""),
+                                               (f"   {head}" if head else "", "dim"))))
+        if self.hits:
+            ol.highlighted = 0
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self.refilter(event.value)
+
+    def action_move(self, d: int) -> None:
+        ol = self.query_one("#find-list", OptionList)
+        if self.hits:
+            ol.highlighted = max(0, min(len(self.hits) - 1, (ol.highlighted or 0) + d))
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        ol = self.query_one("#find-list", OptionList)
+        if self.hits:
+            self.dismiss(self.hits[ol.highlighted or 0])
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(self.hits[event.option_index])

@@ -46,7 +46,7 @@ TabPane { padding: 0; }
 #roots { height: auto; max-height: 8; margin: 0 0 1 0; }
 .hint { color: $text-muted; }
 
-EncodeDialog, ApprovalPrompt, NamePrompt, HelpScreen, SetupScreen, CompareScreen, ConfirmScreen {
+EncodeDialog, ApprovalPrompt, NamePrompt, HelpScreen, SetupScreen, CompareScreen, ConfirmScreen, FindScreen {
     align: center middle; background: $background 70%;
 }
 #enc-box { width: 120; max-width: 98%; height: 96%; border: thick $accent; background: $surface; padding: 0 1; }
@@ -91,3 +91,26 @@ Input.inactive { color: $text-disabled; border: tall $panel; }
 Input.inactive:focus { color: $text; }
 #enc-box Input { border-title-align: right; border-subtitle-align: right; }
 .grid4 { grid-rows: 4; }
+#wins { height: auto; max-height: 100%; display: none; margin-top: 1; }
+
+/* ── responsive ── */
+Screen.-narrow #lib-tree { width: 50%; }
+Screen.-wide #lib-tree { width: 42%; }
+Screen.-narrow #frame-panel { display: none; }
+Screen.-narrow #appr-list, Screen.-narrow #preset-list { width: 32; }
+Screen.-short #jobs { height: 7; }
+Screen.-short #jd-spark, Screen.-short #jd-spark-lbl { display: none; }
+Screen.-short #jd-pipeline { margin: 0; }
+Screen.-short .pbinfo { margin-bottom: 0; }
+Screen.-narrow .grid4 { grid-size: 2; grid-columns: 15 1fr; }
+Screen.-narrow #enc-box, Screen.-narrow #setup-box { width: 100%; height: 100%; border: none; }
+Screen.-narrow .set-row Label { width: 20; }
+Screen.-narrow #appr-box { width: 100%; }
+Screen.-short #lib-actions { display: none; }
+#find-box { width: 100; max-width: 96%; height: auto; max-height: 80%; border: thick $accent; background: $surface;
+            padding: 0 1; }
+#find-list { height: auto; max-height: 20; border: none; }
+#find-hint { height: auto; }
+Screen.-narrow #find-box { width: 100%; }
+#su-picks { height: auto; layout: grid; grid-size: 3; grid-gutter: 0 1; }
+#su-picks Button { width: 100%; }

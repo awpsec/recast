@@ -71,6 +71,40 @@ def is_network_path(path: str) -> bool:
     return fstype in net
 
 
+MEDIA_NAMES = {"tv", "tv shows", "shows", "series", "movies", "films", "anime", "kids", "documentaries",
+               "docs", "media", "video", "videos", "plex", "4k", "uhd", "cartoons"}
+
+
+def suggest_libraries(limit: int = 8) -> list[tuple[str, bool]]:
+    """Likely media folders on mounted drives/shares: [(path, is_network)]. Quick: one listing per mount."""
+    mounts: list[str] = []
+    if sys.platform == "darwin":
+        mounts = [os.path.join("/Volumes", n) for n in _ls("/Volumes") if n != "Macintosh HD"]
+        mounts.append(os.path.expanduser("~/Movies"))
+    elif sys.platform == "win32":
+        mounts = [f"{c}:\\" for c in "DEFGHIJKLMNOPQRSTUVWXYZ" if os.path.isdir(f"{c}:\\")]
+    else:
+        mounts = [os.path.join("/mnt", n) for n in _ls("/mnt")] + \
+                 [os.path.join("/media", u, n) for u in _ls("/media") for n in _ls(os.path.join("/media", u))] + \
+                 [os.path.join("/srv", n) for n in _ls("/srv")] + [os.path.expanduser("~/Videos")]
+    out: list[tuple[str, bool]] = []
+    for m in mounts:
+        if not os.path.isdir(m):
+            continue
+        subs = [os.path.join(m, n) for n in _ls(m) if n.lower() in MEDIA_NAMES and os.path.isdir(os.path.join(m, n))]
+        net = is_network_path(m)
+        for p in subs or ([m] if net else []):
+            out.append((p, net))
+    return out[:limit]
+
+
+def _ls(path: str) -> list[str]:
+    try:
+        return sorted(n for n in os.listdir(path) if not n.startswith((".", "@", "#", "$")))
+    except OSError:
+        return []
+
+
 @dataclass
 class Root:
     name: str

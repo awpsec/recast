@@ -759,7 +759,7 @@ class RecastApp(App):
         sc = self._scan if self._scan and self._scan["root"] == root else None
         if sc and sc["phase"] == "listing":
             head.append(Text(f"◐ listing your library… {sc['done']:,} video files so far", style="#e0af68"))
-        elif sc:
+        elif sc and sc["total"]:
             head.append(Text(f"◐ reading file headers {sc['done']:,}/{sc['total']:,}{self._scan_eta(sc)} — first time "
                              "only, cached after this; the table fills in as it goes and you can keep using recast",
                              style="#e0af68"))
@@ -770,7 +770,8 @@ class RecastApp(App):
             when = self._snap_when.get(root)
             age = _ago(when).replace("since", "listed") if when else ""
             head.append(Text.assemble(("Biggest wins", "bold"), f"  ·  {len(stats)} shows · {n:,} files · {fsize(total)}",
-                                      ("  ·  best case saves ", "dim"), (f"≈{fsize(saves)}", "bold #9ece6a"),
+                                      ("  ·  running it on everything would free ", "dim"),
+                                      (f"≈{fsize(saves)}", "bold #9ece6a"),
                                       (f"  ·  {age} · R rescans", "dim")))
             head.append(Text.assemble(("Ranked by ", "dim"), (self._rank_label(), "#e0af68"),
                                       ("  ·  p changes · ·m = measured from your encodes · Enter jumps · e encodes",
@@ -1964,7 +1965,7 @@ class RecastApp(App):
             for kind in self.arr.clients:
                 ok = kind not in self.arr.errors
                 t.append(f"{'●' if ok else '○'} {kind} ", "#9ece6a" if ok else "#f7768e")
-        if self._scan:
+        if self._scan and (self._scan["total"] or self._scan["phase"] == "listing"):
             t.append(" │ ", "dim")
             sc = self._scan
             t.append(f"◐ scanning {sc['done']:,}" + (f"/{sc['total']:,}" if sc["total"] else "") + self._scan_eta(sc),

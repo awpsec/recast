@@ -23,7 +23,7 @@ from .config import Config, config_dir
 from .encode import (CODEC_LABEL, EncodeSettings, _audio_indices, _sub_indices, build_command, est_bytes,
                      resolve_encoder, two_pass)
 from .ffmpeg import NO_WINDOW, parse_progress, run
-from .probe import MediaInfo, probe_now
+from .probe import VIDEO_EXT, MediaInfo, probe_now
 
 ACTIVE = ("queued", "copying", "ready", "encoding", "paused", "verifying")
 LIVE = ("encoding", "paused", "verifying")
@@ -45,8 +45,9 @@ CODEC_TOKEN_RX = re.compile(r"(?<![A-Za-z0-9])(AV1|x264|x265|h\.?264|h\.?265|HEV
 
 
 def show_root(path: str) -> str:
-    """The show (or movie) folder a path belongs to: Season folders roll up to their parent."""
-    d = path if os.path.isdir(path) or not os.path.splitext(path)[1] else os.path.dirname(path)
+    """The show (or movie) folder a path belongs to: Season folders roll up to their parent.
+    Pure string work — no filesystem access (this runs for every file in a library over SMB)."""
+    d = os.path.dirname(path) if os.path.splitext(path)[1].lower() in VIDEO_EXT else path
     d = d.rstrip("/\\")
     return os.path.dirname(d) if SEASON_RX.match(os.path.basename(d)) else d
 

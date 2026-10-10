@@ -2,12 +2,18 @@
 from __future__ import annotations
 
 from rich.text import Text
+from textual.theme import Theme
 
-CODEC_STYLE = {
-    "AV1": "bold #1a1b26 on #bb9af7", "HEVC": "bold #1a1b26 on #9ece6a", "H.264": "bold #1a1b26 on #7aa2f7",
-    "VC-1": "bold #1a1b26 on #f7768e", "MPEG-2": "bold #1a1b26 on #e0af68", "MPEG-4": "bold #1a1b26 on #e0af68",
-    "VP9": "bold #1a1b26 on #7dcfff", "DivX": "bold #1a1b26 on #f7768e",
-}
+# Monochrome, with colour only where it means something: green = saved/done, amber = needs you,
+# red = failed/danger, blue = working/info. Same palette as the web app.
+RECAST_THEME = Theme(
+    name="recast", dark=True, primary="#8b8b92", secondary="#6e6e73", accent="#58a6ff", foreground="#e6e6e6",
+    background="#0d0d0e", surface="#151517", panel="#1c1c1f", boost="#232327",
+    success="#3fb950", warning="#d29922", error="#f85149",
+)
+SHADES = ["#d0d0d4", "#9a9aa1", "#6a6a71", "#45454b"]  # for breakdowns (codecs) where hue would imply meaning
+
+BADGE = "bold #e6e6e6 on #303036"  # one neutral style: colour is reserved for meaning
 
 
 def fsize(b: float) -> str:
@@ -28,7 +34,7 @@ def fdur(s: float) -> str:
 
 
 def badge(codec: str) -> Text:
-    return Text(f" {codec} ", style=CODEC_STYLE.get(codec, "bold #1a1b26 on #a9b1d6"))
+    return Text(f" {codec} ", style=BADGE)
 
 
 def pct_bar(p: float, width: int = 10) -> str:

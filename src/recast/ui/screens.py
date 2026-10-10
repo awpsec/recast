@@ -73,7 +73,7 @@ class SetupScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         root = self.cfg.roots[0] if self.cfg.roots else None
         with Vertical(id="setup-box"):
-            yield Static(Text.assemble(("◆ recast", "bold #bb9af7"),
+            yield Static(Text.assemble(("◆ recast", "bold #e6e6e6"),
                                        ("   setup · detecting this machine", "bold")))
             with VerticalScroll(id="setup-scroll"):
                 yield Static(id="setup-log")
@@ -135,7 +135,7 @@ class SetupScreen(ModalScreen):
         t = Text("Found these — click to choose one or more:  ", style="dim")
         if self.picked:
             t.append("will add ", "dim")
-            t.append(", ".join(self.picked), "bold #9ece6a")
+            t.append(", ".join(self.picked), "bold #3fb950")
         self.query_one("#su-found", Static).update(t)
         for i, (p, _net) in enumerate(self.found):
             try:
@@ -153,9 +153,9 @@ class SetupScreen(ModalScreen):
     def detect(self) -> None:
         call = self.app.call_from_thread
         call(self._reset)
-        k = lambda s: (f"  {s:<14}", "#7dcfff")
+        k = lambda s: (f"  {s:<14}", "#58a6ff")
         mach = machine_summary()
-        call(self.log_line, Text.assemble(("  ✓", "#9ece6a"), k("Machine"),
+        call(self.log_line, Text.assemble(("  ✓", "#3fb950"), k("Machine"),
                                           f"{mach['host']} · {mach['os']} · {mach['cpu']}"))
         if mach.get("gpu"):
             call(self.log_line, Text.assemble(("   ", ""), k("GPU"), mach["gpu"]))
@@ -163,21 +163,21 @@ class SetupScreen(ModalScreen):
         if not ffm or not ffp:
             how = ("winget install Gyan.FFmpeg" if WIN else "brew install ffmpeg" if sys.platform == "darwin"
                    else "sudo apt install ffmpeg   (or jellyfin-ffmpeg for Intel QSV)")
-            call(self.log_line, Text.assemble(("  ✗", "#f7768e"), k("ffmpeg"),
-                                              ("not found. Install it, then Re-run detection:  ", "#f7768e"),
+            call(self.log_line, Text.assemble(("  ✗", "#f85149"), k("ffmpeg"),
+                                              ("not found. Install it, then Re-run detection:  ", "#f85149"),
                                               (how, "bold")))
             return
         ver = ff.version(ffm)
-        call(self.log_line, Text.assemble(("  ✓", "#9ece6a"), k("ffmpeg"), f"{ver} · {ffm}"))
-        call(self.log_line, Text.assemble(("  ◐", "#e0af68"), k("Encoders"),
+        call(self.log_line, Text.assemble(("  ✓", "#3fb950"), k("ffmpeg"), f"{ver} · {ffm}"))
+        call(self.log_line, Text.assemble(("  ◐", "#d29922"), k("Encoders"),
                                           ("2 s test encode each (1080p test pattern)…", "dim")))
 
         def got(name: str, cap: EncoderCap) -> None:
             line = Text(f"      {name:<20}")
             if cap.status == "ok":
-                line.append(f"✓ works  {cap.fps:>5.0f} fps @1080p", "#9ece6a")
+                line.append(f"✓ works  {cap.fps:>5.0f} fps @1080p", "#3fb950")
             elif cap.status == "failed":
-                line.append(f"✗ {cap.reason}", "#f7768e")
+                line.append(f"✗ {cap.reason}", "#f85149")
             else:
                 line.append("– not in this ffmpeg build", "dim")
             call(self.log_line, line)
@@ -213,9 +213,9 @@ class SetupScreen(ModalScreen):
                 self.query_one("#su-remote", Switch).value = net
                 subs = [e.name for e in os.scandir(p) if e.is_dir() and not e.name.startswith(".")][:6]
                 info.update(Text(f"✓ found · {'network share → files are copied to scratch first' if net else 'local disk'}"
-                                 + (f" · contains {', '.join(subs)}" if subs else ""), style="#9ece6a"))
+                                 + (f" · contains {', '.join(subs)}" if subs else ""), style="#3fb950"))
             else:
-                info.update(Text("✗ folder doesn't exist (yet)", style="#f7768e"))
+                info.update(Text("✗ folder doesn't exist (yet)", style="#f85149"))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id or ""
@@ -287,9 +287,9 @@ def encoder_options(codec: str, caps: dict[str, EncoderCap]) -> list[tuple]:
         st = enc_status(e, caps)
         c = caps.get(e)
         if st == "ok":
-            opts.append((Text.assemble(e, (f"  ✓ {c.fps:.0f} fps" if c and c.fps else "  ✓", "#9ece6a")), e))
+            opts.append((Text.assemble(e, (f"  ✓ {c.fps:.0f} fps" if c and c.fps else "  ✓", "#3fb950")), e))
         else:
-            opts.append((Text(f"{e}  ✗ {'failed probe' if st == 'failed' else 'not available'}", style="#f7768e"), e))
+            opts.append((Text(f"{e}  ✗ {'failed probe' if st == 'failed' else 'not available'}", style="#f85149"), e))
     return opts
 
 
@@ -459,9 +459,9 @@ class EncodeDialog(ModalScreen):
         name = self.query_one("#f-preset").value
         st = self.query_one("#preset-state", Static)
         if name == "__custom__":
-            st.update(Text("on-the-fly settings", style="#e0af68"))
+            st.update(Text("on-the-fly settings", style="#d29922"))
         elif not settings_match(self.presets, name, s):
-            st.update(Text("● modified from preset", style="#e0af68"))
+            st.update(Text("● modified from preset", style="#d29922"))
         else:
             st.update(Text(self.presets[name][0], style="dim"))
         self.sample = next((f for f in self.files if not already_target(s, f, self.caps)), self.sample)
@@ -477,8 +477,8 @@ class EncodeDialog(ModalScreen):
             for j, tok in enumerate(grp):
                 t.append(" " if j else "")
                 q = quote(tok, WIN)
-                style = ("bold #ff9e64" if tok == "ffmpeg" else "#7dcfff" if tok.startswith("-") and not tok[1:2].isdigit()
-                         else "#9ece6a" if ("/" in tok or "\\" in tok) else "#c0caf5")
+                style = ("bold #e6e6e6" if tok == "ffmpeg" else "#58a6ff" if tok.startswith("-") and not tok[1:2].isdigit()
+                         else "#3fb950" if ("/" in tok or "\\" in tok) else "#e6e6e6")
                 t.append(q, style)
             if i < len(groups) - 1:
                 t.append(" ^\n" if WIN else " \\\n", "dim")
@@ -492,25 +492,25 @@ class EncodeDialog(ModalScreen):
         e = Text()
         e.append("Estimate  ", "bold")
         e.append(f"{fsize(m.size)} → ≈{fsize(per)} ")
-        e.append(f"({(per / max(1, m.size) - 1) * 100:+.0f}%)", "bold #9ece6a" if per < m.size else "bold #f7768e")
+        e.append(f"({(per / max(1, m.size) - 1) * 100:+.0f}%)", "bold #3fb950" if per < m.size else "bold #f85149")
         e.append(f" for {os.path.basename(m.path) if len(self.all_files) > 1 else 'this file'}\n          ")
-        e.append(enc, "bold #7dcfff")
+        e.append(enc, "bold #58a6ff")
         e.append(f" on {self.cfg.machine.get('host', 'this machine')}" + (" (auto)" if note == "auto" else ""))
         if s.codec != "copy":
             e.append(f" · {pix_fmt_name(enc, ten_bit(s, m))}")
         e.append(f" · ~{fps:.0f} fps · ≈{fdur(m.frames / fps if m.frames else m.duration)} per file")
         if note and note != "auto":
-            e.append(f"\n          ⚠ {note}", "#e0af68")
+            e.append(f"\n          ⚠ {note}", "#d29922")
         if m.interlaced and not s.deinterlace and s.codec != "copy":
             e.append("\n          ⚠ source is interlaced — turn on Deinterlace (Advanced) or use “DVD rescue”",
-                     "#e0af68")
+                     "#d29922")
         if m.hdr == "Dolby Vision" and s.codec != "copy":
-            e.append("\n          ⚠ Dolby Vision layer is dropped; the HDR10 base layer is kept", "#e0af68")
+            e.append("\n          ⚠ Dolby Vision layer is dropped; the HDR10 base layer is kept", "#d29922")
         same = name != "__custom__" and settings_match(self.presets, name, s)
         meas = self.measured.get(name) if same else None
         if meas:
             e.append(f"\n          measured on this show: {(meas[0] - 1) * 100:+.0f}% over {meas[1]} file"
-                     f"{'s' * (meas[1] != 1)}", "#9ece6a")
+                     f"{'s' * (meas[1] != 1)}", "#3fb950")
         multi = len(self.all_files) > 1
         if multi:
             todo = [f for f in self.files if not already_target(s, f, self.caps)]
@@ -518,7 +518,7 @@ class EncodeDialog(ModalScreen):
             out_b = src_b * meas[0] if meas else sum(est_bytes(s, f, self.caps) for f in todo)
             secs = sum((f.frames or f.duration * 24) / est_fps(s, f, self.caps) for f in todo)
             e.append(f"\n          {len(todo)} file{'s' * (len(todo) != 1)} to encode · {fsize(src_b)} → "
-                     f"≈{fsize(out_b)} · saves ≈{fsize(src_b - out_b)} · ≈{fdur(secs)} total", "#7dcfff")
+                     f"≈{fsize(out_b)} · saves ≈{fsize(src_b - out_b)} · ≈{fdur(secs)} total", "#58a6ff")
             why = []
             reasons: dict[str, int] = {}
             for f in self.files:
@@ -539,7 +539,7 @@ class EncodeDialog(ModalScreen):
             except Exception:
                 pass
         if problem:
-            e.append(f"\n          ✗ {problem}", "bold #f7768e")
+            e.append(f"\n          ✗ {problem}", "bold #f85149")
         self.query_one("#go-preview", Button).disabled = bool(problem)
         self.query_one("#est", Static).update(e)
 
@@ -585,7 +585,7 @@ class EncodeDialog(ModalScreen):
         cr.border_subtitle = f"{name} 0–{top} · lower = better"
         br.border_title = f"{bw} @{h}p"
         br.border_subtitle = ""
-        cr.styles.border_title_color = QUALITY_STYLE[cw].split()[-1] if 0 <= s.crf <= top else "#f7768e"
+        cr.styles.border_title_color = QUALITY_STYLE[cw].split()[-1] if 0 <= s.crf <= top else "#f85149"
         br.styles.border_title_color = QUALITY_STYLE[bw].split()[-1]
         return problem
 
@@ -684,8 +684,8 @@ def compare_table(j, caps) -> Table:
     t = Table(box=None, padding=(0, 2), header_style="bold")
     for c in ("", "Source", "Output", ""):
         t.add_column(c)
-    ok = Text("✓", style="bold #9ece6a")
-    warn = Text("⚑", style="bold #e0af68")
+    ok = Text("✓", style="bold #3fb950")
+    warn = Text("⚑", style="bold #d29922")
     enc = next((l.split("-c:v ", 1)[1].split()[0] for l in j.log if "-c:v " in l), resolve_encoder(s, caps)[0])
     t.add_row("Codec", Text.assemble(badge(m.codec), f" {m.profile}"),
               Text.assemble(badge(o.get("codec", "?")), f" {enc}"), "")
@@ -694,7 +694,7 @@ def compare_table(j, caps) -> Table:
     t.add_row("Video bitrate", f"{m.vkbps:,} kb/s", f"{out_v:,} kb/s", "")
     saved = 1 - j.out_size / max(1, m.size)
     t.add_row("Size", fsize(m.size), Text(f"{fsize(j.out_size)}  ({-saved * 100:+.0f}%)",
-                                          style="bold #9ece6a" if saved > 0 else "bold #f7768e"), "")
+                                          style="bold #3fb950" if saved > 0 else "bold #f85149"), "")
     dd = abs(o.get("duration", 0) - m.duration)
     t.add_row("Duration", fdur(m.duration), fdur(o.get("duration", 0)), ok if dd <= max(1, m.duration * .005) else warn)
     t.add_row("Audio", f"{len(m.audio)} tracks", f"{len(o.get('audio', []))} tracks "
@@ -702,7 +702,7 @@ def compare_table(j, caps) -> Table:
     t.add_row("Subtitles", f"{len(m.subs)} tracks", f"{len(o.get('subs', []))} tracks", "")
     t.add_row("Encode time", "", fdur(j.finished - j.started) if j.finished and j.started else "—", "")
     if j.flag:
-        t.add_row(Text("Flag", style="bold #e0af68"), "", Text(j.flag, style="#e0af68"), warn)
+        t.add_row(Text("Flag", style="bold #d29922"), "", Text(j.flag, style="#d29922"), warn)
     else:
         t.add_row("Checks", "", "duration · streams · decode test", ok)
     return t
@@ -721,7 +721,7 @@ class ApprovalPrompt(ModalScreen):
     def compose(self) -> ComposeResult:
         j = self.job
         with Vertical(id="appr-box"):
-            yield Static(Text.assemble(("⚑ Encode finished — replace in library?\n", "bold #bb9af7"),
+            yield Static(Text.assemble(("⚑ Encode finished — replace in library?\n", "bold #d29922"),
                                        (os.path.basename(j.src), "bold"), ("\n" + j.src, "dim")))
             yield Static(compare_table(j, self.caps))
             yield Static(Text("Closing this keeps it in the Approvals inbox. Nothing times out.", style="dim"))
@@ -793,10 +793,10 @@ class CompareScreen(ModalScreen):
         cap = Text.assemble((f"{fdur(t)}", "bold"), f"  ({self.i + 1}/{len(self.POINTS)})   ")
         if self.split:
             img = side_by_side(a, b)
-            cap.append("◀ source │ encoded ▶", "#e0af68")
+            cap.append("◀ source │ encoded ▶", "#d29922")
         else:
             img = b if self.show_out else a
-            cap.append("ENCODED" if self.show_out else "SOURCE", "bold #9ece6a" if self.show_out else "bold #7dcfff")
+            cap.append("ENCODED" if self.show_out else "SOURCE", "bold #3fb950" if self.show_out else "bold #58a6ff")
         self.query_one("#cmp-cap", Static).update(cap)
         self.query_one("#cmp-frame", FrameView).set_image(img, "couldn't decode a frame here")
 
@@ -837,10 +837,10 @@ class HelpScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         t = Table(box=None, padding=(0, 2), show_header=False)
-        t.add_column(style="bold #7dcfff", no_wrap=True)
+        t.add_column(style="bold #58a6ff", no_wrap=True)
         t.add_column()
         for title, rows in self.SECTIONS:
-            t.add_row(Text(title, style="bold #bb9af7"), "")
+            t.add_row(Text(title, style="bold #e6e6e6"), "")
             for k, d in rows:
                 t.add_row("  " + k, d)
         with Vertical(id="help-box"):
@@ -891,7 +891,7 @@ class FindScreen(ModalScreen):
         self.hits = [p for _, p, _, _ in scored[:30]]
         for _, p, is_dir, rel in scored[:30]:
             head, tail = os.path.split(rel)
-            ol.add_option(Option(Text.assemble(("▸ " if is_dir else "  ", "#7dcfff"), (tail, "bold" if is_dir else ""),
+            ol.add_option(Option(Text.assemble(("▸ " if is_dir else "  ", "#58a6ff"), (tail, "bold" if is_dir else ""),
                                                (f"   {head}" if head else "", "dim"))))
         if self.hits:
             ol.highlighted = 0

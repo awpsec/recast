@@ -100,8 +100,8 @@ CRF_SCALE = {"h264": ("x264", 51), "hevc": ("x265", 51), "av1": ("SVT-AV1", 63)}
 # video bits per pixel per frame, roughly where each word starts (HEVC); H.264 needs ~1.5x, AV1 ~0.75x
 BPP_TIERS = [(0.020, "very low"), (0.034, "low"), (0.050, "balanced"), (0.085, "high"), (0.13, "very high"),
              (9.0, "extreme")]
-QUALITY_STYLE = {"extreme": "bold #9ece6a", "very high": "bold #9ece6a", "high": "#9ece6a", "balanced": "#c0caf5",
-                 "low": "#e0af68", "very low": "bold #f7768e"}
+QUALITY_STYLE = {"extreme": "bold #3fb950", "very high": "bold #3fb950", "high": "#3fb950", "balanced": "#e6e6e6",
+                 "low": "#d29922", "very low": "bold #f85149"}
 
 
 def crf_word(codec: str, crf: int) -> str:

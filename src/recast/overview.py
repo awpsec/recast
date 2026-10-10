@@ -46,13 +46,13 @@ def load_snapshot(root: str) -> dict | None:
         return None
 
 
-def save_snapshot(root: str, entries: list[tuple[str, int, float]]) -> None:
+def save_snapshot(root: str, entries: list[tuple[str, int, float]], when: float | None = None) -> None:
     p = snapshot_file()
     try:
         data = json.loads(p.read_text())
     except (OSError, ValueError):
         data = {}
-    data[root] = {"when": time.time(), "files": entries}
+    data[root] = {"when": when or time.time(), "files": entries}
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(data))

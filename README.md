@@ -1,8 +1,17 @@
 # recast
 
-A terminal app for re-encoding a Plex / Sonarr / Radarr library with ffmpeg, safely:
-encode one file or a whole season, watch it happen, then approve before anything in
-your library changes.
+Re-encode a Plex / Sonarr / Radarr library with ffmpeg, safely: encode one file or a whole
+season, watch it happen, and approve before anything in your library changes. Or turn on
+automation and let it keep the library optimized by itself, one file at a time.
+
+Two front ends over the same engine:
+
+- **`recast`** — a terminal app (keyboard + mouse).
+- **`recast web`** — a browser app plus a background daemon with Sonarr/Radarr automation.
+
+Only one of them runs per machine at a time (they share the queue and scratch folder).
+
+### What it does
 
 - **Find your biggest wins**: highlight a library folder and recast scans it in the
   background (headers only, cached — a 10k-file NAS library takes ~20 min once, then
@@ -82,8 +91,114 @@ your mounted drives/shares (pick one or several, e.g. `…/tv` and `…/movies`)
 (default `~/Documents/recast`, i.e. `C:\Users\<you>\Documents\recast`), and you're done.
 Re-run detection any time from Settings or with `recast --setup`.
 
-`recast --web` serves the same UI in a browser at http://localhost:8765 (needs
-`textual-serve`, included in the `dev` extra).
+For the browser app, run `recast web` instead and open http://localhost:8484 — on a fresh
+install it walks through the same setup in the browser.
+
+## Web app
+
+```bash
+recast web
+```
+
+Dashboard (space saved, what could still be freed, what's encoding with a live frame, what
+automation will do next), Library (shows ranked by potential saving, browse into any folder,
+see what every preset would do, encode), Queue, Review (side-by-side frame compare, replace or
+discard), Automation, Presets, History (undo) and Settings. Light and dark follow your system.
+
+It listens on this computer only. To open it from another machine (e.g. it runs on the
+server and you're on the couch):
+
+```bash
+recast web --host 0.0.0.0 --port 8484
+```
+
+Set a password first (Settings → Security); recast warns until you do.
+
+## Automation
+
+Turn it on in the web app (**Automation** page). Every file gets a score: the estimated space
+saving with your preferred preset — measured from your real results on that show once there are
+some. You set two numbers:
+
+| score | what happens |
+|---|---|
+| ≥ **replace automatically** (default 30%) | encoded, checked, and swapped in by itself |
+| between the two | listed under **Review → Borderline files**; nothing is encoded until you say so |
+| < **ask me** (default 10%) | skipped (remembered until the file changes) |
+
+The page shows, live as you drag the sliders, how many files land in each bucket and how much
+space that frees. A **dry run** mode makes all the decisions and shows them without encoding
+anything.
+
+Safety valve: an automatic encode only replaces the original if the *real* saving also clears
+your bar and every check passes (duration, streams, size, decode test). Otherwise it waits in
+Review with a note saying why. Originals go to recast's trash, so History can undo it.
+
+**Pacing** — the point is a library that gets better overnight without a hammered NAS or a full
+scratch disk:
+
+- One encode at a time, with at most **one** file copied ahead while it runs. Never more, so the
+  first run on a 10,000-file library trickles through one by one instead of queueing everything.
+- Each file is read from the NAS once, sequentially, and written back once.
+- Biggest savings first. New downloads (via webhook) jump to the front.
+- Optional working hours (e.g. 01:00–08:00) for starting new files.
+- Stops starting new work if encodes waiting for you fill the scratch budget.
+- If the share drops off, it waits; nothing is thrown away.
+- Finding new files: a cheap folder re-list every N hours (default 24) — only new or changed
+  files get their headers read. With webhooks you rarely need it.
+- For series Sonarr marks as **anime**, a separate preset can be used (e.g. *Anime HEVC · 1800k*).
+
+### Sonarr / Radarr
+
+1. **Settings → Sonarr & Radarr**: URL + API key, then *Save & test*. recast maps their folder
+   paths to yours automatically (e.g. `/tv` → `/Volumes/nas/tv`) — needed for webhooks, anime
+   detection, episode names and a rescan after each replace.
+2. **Automation** page: copy the webhook URL for each.
+3. In Sonarr/Radarr: **Settings → Connect → + → Webhook**, paste the URL, method POST,
+   triggers *On Import* and *On Upgrade*, press *Test* (it shows up in recast's activity log).
+
+New imports are looked at ~90 seconds later (so Sonarr/Radarr are done with them), scored, and
+encoded next if they clear your bar. An upgrade of a file recast already re-encoded counts as a
+new file.
+
+### Run it as a service
+
+Run it as your user (that's who has the network share mounted).
+
+**macOS** — `~/Library/LaunchAgents/com.recast.web.plist`, then
+`launchctl load ~/Library/LaunchAgents/com.recast.web.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.recast.web</string>
+  <key>ProgramArguments</key><array><string>/Users/YOU/.local/bin/recast</string><string>web</string></array>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict></plist>
+```
+
+**Linux** — `~/.config/systemd/user/recast.service`, then
+`systemctl --user enable --now recast` (and `loginctl enable-linger $USER` so it runs without a login):
+
+```ini
+[Unit]
+Description=recast web
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/recast web --host 0.0.0.0
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+**Windows** — Task Scheduler → *Create Task*: trigger *At log on*, action
+`C:\Users\YOU\.local\bin\recast.exe` with arguments `web`, and untick *Stop the task if it runs
+longer than…*.
 
 ## Keys
 
@@ -112,8 +227,10 @@ Re-run detection any time from Settings or with `recast --setup`.
 
 - `config.json`: library folders, scratch, detected encoders, Sonarr/Radarr.
 - `presets/*.json`: one file per preset; edit in the app or any editor.
-- `state.json`: queue and approval inbox.
+- `state.json`: queue, approval inbox and the history of replaced files.
 - `probe-cache.json`: ffprobe results, so headers aren't re-read from the NAS.
+- `overview.json`: the last listing of each library folder.
+- `automation.json`: borderline/skipped decisions and the activity log.
 
 Set `RECAST_HOME` to use a different folder.
 
@@ -149,5 +266,6 @@ uv venv && uv pip install -e ".[dev]"
 
 The tests generate a small library of real clips with ffmpeg (AV1, MPEG-2 with 5.1(side)
 audio, H.264) and run complete encode → approve → replace cycles against it.
-`python scripts/demo_web.py` serves the app against a throwaway demo library.
+`python scripts/demo_webapp.py` runs the web app against a throwaway demo library
+(`scripts/demo_web.py` does the same for the terminal app via textual-serve).
 `prototype/` holds the original clickable mock-up.

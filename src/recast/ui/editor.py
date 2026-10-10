@@ -116,7 +116,7 @@ class PresetEditor(TextArea):
     def on_mount(self) -> None:
         base = TextAreaTheme.get_builtin_theme("vscode_dark")
         styles = dict(base.syntax_styles)
-        styles["recast.invalid"] = Style(color="#f7768e", bold=True, underline=True)
+        styles["recast.invalid"] = Style(color="#f85149", bold=True, underline=True)
         theme = TextAreaTheme("recast", syntax_styles=styles, base_style=base.base_style,
                               gutter_style=base.gutter_style, cursor_style=base.cursor_style,
                               cursor_line_style=base.cursor_line_style, selection_style=base.selection_style,
@@ -239,10 +239,10 @@ class PresetEditor(TextArea):
             label = _plain(o.value) if self.ctx and self.ctx.kind == "value" else str(o.value)
             if label == "":
                 label = '""'
-            style = ("bold #f7768e" if not o.ok else "bold #c0caf5") + (" reverse" if sel else "")
+            style = ("bold #f85149" if not o.ok else "bold #e6e6e6") + (" reverse" if sel else "")
             t.append(("▸ " if sel else "  ") + label.ljust(20), style)
             if o.desc:
-                t.append("  " + o.desc[:46], "#f7768e" if not o.ok else "dim")
+                t.append("  " + o.desc[:46], "#f85149" if not o.ok else "dim")
             t.append("\n")
         more = len(self.items) - MAX_ROWS
         t.append(f"{'+' + str(more) + ' more · ' if more > 0 else ''}tab accept · ↑↓ choose · esc", "dim italic")

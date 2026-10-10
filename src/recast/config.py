@@ -161,7 +161,18 @@ class Config:
     desktop_notify: bool = True # OS notification when something needs you
     preview_cadence: float = 1.0
     last_path: str = ""  # where the library tree was; reopened on launch
-    theme: str = "tokyo-night"
+    # ── automation (runs in `recast web`) ──
+    auto_mode: str = "off"          # off | dry (show decisions only) | on
+    auto_preset: str = ""           # "" = default preset
+    auto_preset_anime: str = ""     # used for series Sonarr marks as anime ("" = same as auto_preset)
+    auto_threshold: float = 0.30    # estimated saving ≥ this → encode + replace automatically (if the real saving holds)
+    review_threshold: float = 0.10  # between this and auto_threshold → review list; below → skip
+    auto_hours: str = ""            # "" = any time, or "01:00-08:00" to only start new work in that window
+    sweep_hours: int = 24           # re-list the library for new/changed files this often
+    webhook_token: str = ""         # for Sonarr/Radarr Connect → Webhook URLs
+    # ── web app ──
+    web_password_hash: str = ""     # pbkdf2 "salt$hash"; empty = no login (fine on localhost only)
+    theme: str = "recast"
 
     @property
     def needs_setup(self) -> bool:
@@ -190,6 +201,8 @@ class Config:
         c.encoders = {k: EncoderCap(**v) if isinstance(v, dict) else v for k, v in c.encoders.items()}
         c.sonarr = Arr(**c.sonarr) if isinstance(c.sonarr, dict) else c.sonarr
         c.radarr = Arr(**c.radarr) if isinstance(c.radarr, dict) else c.radarr
+        if c.theme == "tokyo-night":  # the old built-in default, never chosen by hand
+            c.theme = "recast"
         return c
 
 

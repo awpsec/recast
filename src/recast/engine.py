@@ -101,6 +101,9 @@ class Job:
     final: str = ""  # path of the new file in the library after replace
     orig: str = ""   # where the original went (trash / .orig), for undo
     phase: str = ""  # "pass 1/2" during two-pass analysis
+    origin: str = "manual"   # manual | auto (created by automation) | review (borderline, you said go)
+    auto_min_saving: float = -1.0  # ≥0: replace without asking only if the real saving reaches this
+    note: str = ""           # why it's waiting for you (e.g. saved less than the auto threshold)
     log: list = field(default_factory=list)
     spark: list = field(default_factory=list)
 
@@ -245,6 +248,11 @@ class Engine:
         return {norm(j.src) for j in self.jobs.values()
                 if j.stage in ACTIVE or j.stage in ("awaiting", "to_replace", "replacing")}
 
+    def done_sizes(self) -> dict[str, int]:
+        """Library file recast produced → its size then. A different size now means the file was replaced
+        since (e.g. a Sonarr upgrade) and is fair game again."""
+        return {norm(h["final"]): h.get("out_size", 0) for h in self.history if h.get("final") and not h.get("restored")}
+
     def done_paths(self) -> set[str]:
         """Library files recast itself produced (so 'encode all' never redoes them)."""
         return {norm(h["final"]) for h in self.history if h.get("final") and not h.get("restored")}
@@ -388,20 +396,23 @@ class Engine:
 
     # ── scheduling (called ~4x a second by the app) ──
     def root_ok(self, j: Job) -> bool:
-        """Is this job's library folder reachable? Checked at most every 5 s per folder (a hung share
+        return self.root_ok_path(j.root_path)
+
+    def root_ok_path(self, root_path: str) -> bool:
+        """Is this library folder reachable? Checked at most every 5 s per folder (a hung share
         can make stat() slow); transitions are reported once so the UI can say so."""
         now = time.monotonic()
-        last = self._root_seen.get(j.root_path)
+        last = self._root_seen.get(root_path)
         if last and now - last[0] < 5:
             return last[1]
-        ok = os.path.isdir(j.root_path)
-        self._root_seen[j.root_path] = (now, ok)
-        if ok and j.root_path in self.offline:
-            self.offline.discard(j.root_path)
-            self.on_event("online", j.root_path)
-        elif not ok and j.root_path not in self.offline:
-            self.offline.add(j.root_path)
-            self.on_event("offline", j.root_path)
+        ok = os.path.isdir(root_path)
+        self._root_seen[root_path] = (now, ok)
+        if ok and root_path in self.offline:
+            self.offline.discard(root_path)
+            self.on_event("online", root_path)
+        elif not ok and root_path not in self.offline:
+            self.offline.add(root_path)
+            self.on_event("offline", root_path)
         return ok
 
     def tick(self) -> None:
@@ -650,6 +661,19 @@ class Engine:
             return  # cancelled / denied meanwhile
         b = self.batch_of(j)
         s = j.s
+        if j.auto_min_saving >= 0:  # automation: replace by itself only when the real result clearly pays off
+            actual = 1 - j.out_size / max(1, j.info.get("size", 1))
+            if not j.flag and actual >= j.auto_min_saving:
+                j.stage = "to_replace"
+            else:
+                j.stage, j.waiting_since = "awaiting", time.time()
+                if not j.flag:
+                    j.note = (f"saved {actual * 100:.0f}% — below the {j.auto_min_saving * 100:.0f}% you set for "
+                              "replacing automatically")
+            self.touch()
+            self.on_event("auto_done", j)
+            self.save(force=True)
+            return
         if s.after == "keep":
             j.stage = "awaiting" if j.flag else "to_replace"
             j.result = "keep"

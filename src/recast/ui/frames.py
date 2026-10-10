@@ -76,7 +76,7 @@ class FrameView(Widget):
             if y == self.size.height // 2 and self.message:
                 msg = self.message[:W]
                 pad = (W - len(msg)) // 2
-                return Strip([Segment(" " * pad), Segment(msg, Style(color="#565f89")),
+                return Strip([Segment(" " * pad), Segment(msg, Style(color="#6e6e73")),
                               Segment(" " * (W - pad - len(msg)))], W)
             return Strip.blank(W)
         ox, oy, w, h, px = self._rows[0]

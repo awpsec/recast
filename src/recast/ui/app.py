@@ -25,22 +25,23 @@ from ..encode import (CODEC_LABEL, EncodeSettings, already_target, delete_preset
                       skip_reason, two_pass,
                       preset_doc, resolve_encoder, save_preset)
 from ..engine import ACTIVE, LIVE, Batch, Engine, Job, norm, show_root
-from ..overview import ShowStat, duplicate_groups, list_files, load_snapshot, pretty_title, rank, save_snapshot
+from ..overview import duplicate_groups, load_snapshot, pretty_title
+from ..service import Service
 from ..probe import VIDEO_EXT, MediaInfo, ProbeCache
 from .editor import PresetEditor
 from .frames import FrameView, load_image
 from .screens import (ApprovalPrompt, CompareScreen, ConfirmScreen, EncodeDialog, FindScreen, HelpScreen, NamePrompt,
                       SetupScreen, compare_table)
-from .style import CODEC_STYLE, badge, fdur, fsize, pct_bar
+from .style import RECAST_THEME, SHADES, badge, fdur, fsize, pct_bar
 
 CADENCES = [("live", 0.25), ("0.5s", 0.5), ("1s", 1.0), ("5s", 5.0)]
 STAGE = {
-    "queued": ("◌ queued", "dim"), "copying": ("⇣ copying", "#7dcfff"), "ready": ("◌ in scratch", "#7dcfff"),
-    "encoding": ("● encoding", "bold #e0af68"), "paused": ("❚❚ paused", "#e0af68"),
-    "verifying": ("◎ verifying", "#7aa2f7"), "awaiting": ("⚑ awaiting approval", "bold #bb9af7"),
-    "to_replace": ("⇡ queued for replace", "#7dcfff"), "replacing": ("⇡ replacing", "#7dcfff"),
-    "replaced": ("✓ replaced", "#9ece6a"), "kept": ("✓ kept both", "#9ece6a"), "discarded": ("✗ discarded", "dim"),
-    "cancelled": ("✗ cancelled", "dim"), "skipped": ("↷ skipped", "dim"), "failed": ("✗ failed", "bold #f7768e"),
+    "queued": ("◌ queued", "dim"), "copying": ("⇣ copying", "#58a6ff"), "ready": ("◌ in scratch", "#58a6ff"),
+    "encoding": ("● encoding", "bold #d29922"), "paused": ("❚❚ paused", "#d29922"),
+    "verifying": ("◎ verifying", "#58a6ff"), "awaiting": ("⚑ awaiting approval", "bold #d29922"),
+    "to_replace": ("⇡ queued for replace", "#58a6ff"), "replacing": ("⇡ replacing", "#58a6ff"),
+    "replaced": ("✓ replaced", "#3fb950"), "kept": ("✓ kept both", "#3fb950"), "discarded": ("✗ discarded", "dim"),
+    "cancelled": ("✗ cancelled", "dim"), "skipped": ("↷ skipped", "dim"), "failed": ("✗ failed", "bold #f85149"),
 }
 
 
@@ -57,7 +58,7 @@ class JobItem(ListItem):
     def __init__(self, job: Job):
         self.job = job
         m = job.info
-        lbl = Text.assemble(("⚑ " if job.flag else "● ", "#e0af68" if job.flag else "#bb9af7"),
+        lbl = Text.assemble(("⚑ " if job.flag else "● ", "#d29922" if job.flag else "#d29922"),
                             (job.name[:40], "bold"), "\n  ", badge(m.get("codec", "?")), " → ",
                             badge((job.out_info or {}).get("codec", CODEC_LABEL.get(job.s.codec, "?"))),
                             (f"  {_ago(job.waiting_since)}", "dim"))
@@ -76,11 +77,11 @@ class BatchItem(ListItem):
         done = len(e.batch_jobs(b, "awaiting", "to_replace", "replacing", "replaced"))
         flagged = sum(1 for j in e.batch_jobs(b, "awaiting") if j.flag)
         active = bool(e.batch_jobs(b, *ACTIVE))
-        t = Text.assemble(("▤ ", "#bb9af7"), (_short(b.folder)[:40], "bold"), "\n  ")
-        t.append(f"{done}/{len(todo)} ", "#e0af68" if active else "#9ece6a")
-        t.append(pct_bar(done / max(1, len(todo)), 8), "#e0af68" if active else "#9ece6a")
+        t = Text.assemble(("▤ ", "#8b8b92"), (_short(b.folder)[:40], "bold"), "\n  ")
+        t.append(f"{done}/{len(todo)} ", "#d29922" if active else "#3fb950")
+        t.append(pct_bar(done / max(1, len(todo)), 8), "#d29922" if active else "#3fb950")
         if flagged:
-            t.append(f" ⚑{flagged}", "#e0af68")
+            t.append(f" ⚑{flagged}", "#d29922")
         t.append(f"  {_ago(b.waiting_since)}", "dim")
         return t
 
@@ -88,7 +89,7 @@ class BatchItem(ListItem):
 class PresetItem(ListItem):
     def __init__(self, name: str, default: bool):
         self.preset_name = name
-        super().__init__(Label(Text.assemble(("★ " if default else "  ", "#e0af68"), name)))
+        super().__init__(Label(Text.assemble(("★ " if default else "  ", "#d29922"), name)))
 
 
 def _ago(ts: float) -> str:
@@ -158,9 +159,10 @@ class RecastApp(App):
     def __init__(self):
         super().__init__()
         self.cfg = Config.load()
-        self.presets = load_presets()
-        self.engine = Engine(self.cfg, self.on_engine_event)
-        self.probes = ProbeCache(self.cfg.ffprobe)
+        self.svc = Service(self.cfg)            # engine, header cache, scanner, Sonarr/Radarr — shared with `recast web`
+        self.engine = self.svc.engine
+        self.scanner = self.svc.scanner
+        self.svc.subscribe(self.on_engine_event)
         self.arr: ArrIndex | None = None
         self.selected_job: Job | None = None
         self.frame_on = True
@@ -173,19 +175,25 @@ class RecastApp(App):
         self._tree_w = 80
         self._stat: dict[str, tuple[int, float]] = {}  # path → (size, mtime) seen while listing folders
         self._details_w = 80
-        self.overview: dict[str, list[ShowStat]] = {}   # root → ranked shows
-        self.show_stats: dict[str, ShowStat] = {}       # show folder → stats (tree badges)
-        self._scan: dict | None = None                  # progress of a running library scan
         self._quick_dirs: dict[str, list[str]] = {}
-        self._entries: dict[str, list] = {}       # root → listed files (from the scan / snapshot)
-        self._infos: dict[str, dict] = {}         # root → path → MediaInfo
-        self._snap_when: dict[str, float] = {}
-        self._overview_dirty = False
-        self._rank_by: str | None = "★"          # "★" = default preset, None = best of all, else a preset name
         self._badges: dict[str, str] = {}         # tree node path → last label text (skip no-op relabels)
         self._ticks = 0
 
     # ── layout ──
+    # ── shared core (see service.py); these keep the rest of the TUI readable ──
+    presets = property(lambda self: self.svc.presets, lambda self, v: setattr(self.svc, "presets", v))
+    probes = property(lambda self: self.svc.probes, lambda self, v: setattr(self.svc, "probes", v))
+    arr = property(lambda self: self.svc.arr, lambda self, v: setattr(self.svc, "arr", v))
+    overview = property(lambda self: self.scanner.stats)
+    show_stats = property(lambda self: self.scanner.show_stats)
+    _scan = property(lambda self: self.scanner.state)
+    _snap_when = property(lambda self: self.scanner.snap_when)
+    _overview_dirty = property(lambda self: self.scanner.dirty, lambda self, v: setattr(self.scanner, "dirty", v))
+    _rank_by = property(lambda self: self.scanner.rank_by, lambda self, v: setattr(self.scanner, "rank_by", v))
+
+    def _publish_overview(self, root: str) -> None:
+        self.scanner.publish(root)
+
     def compose(self) -> ComposeResult:
         yield Static(id="topbar")
         with TabbedContent(initial="tab-library", id="tabs"):
@@ -321,7 +329,8 @@ class RecastApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.theme = self.cfg.theme if self.cfg.theme in self.available_themes else "tokyo-night"
+        self.register_theme(RECAST_THEME)
+        self.theme = self.cfg.theme if self.cfg.theme in self.available_themes else "recast"
         self.query_one("#lib-tree").border_title = "Library"
         self.query_one("#details-scroll").border_title = "Details"
         jobs = self.query_one("#jobs", DataTable)
@@ -376,7 +385,7 @@ class RecastApp(App):
 
     def start(self) -> None:
         self._measure_tree()
-        self.probes = ProbeCache(self.cfg.ffprobe)
+        self.probes = ProbeCache(self.cfg.ffprobe)  # ffprobe path may have just been detected
         self.query_one("#preset-editor", PresetEditor).caps = self.cfg.encoders
         self.build_tree()
         if self.cfg.last_path and os.path.exists(self.cfg.last_path):
@@ -406,11 +415,10 @@ class RecastApp(App):
 
     def connect_arr(self) -> None:
         if self.cfg.sonarr.enabled or self.cfg.radarr.enabled:
-            self.arr = ArrIndex(self.cfg.sonarr, self.cfg.radarr)
-            self.engine.arr = self.arr
+            self.svc.connect_arr()
             self.refresh_arr()
         else:
-            self.arr = self.engine.arr = None
+            self.svc.connect_arr()
 
     @work(thread=True, group="arr", exclusive=True)
     def refresh_arr(self) -> None:
@@ -426,10 +434,10 @@ class RecastApp(App):
         tree.guide_depth = 3
         for r in self.cfg.roots:
             label = Text.assemble((r.name, "bold"),
-                                  ("  ⇄ network" if r.remote else "  local", "#7dcfff" if r.remote else "dim"))
+                                  ("  ⇄ network" if r.remote else "  local", "#58a6ff" if r.remote else "dim"))
             n = tree.root.add(label, data=Node("dir", r.path, r), expand=False)
             if not os.path.isdir(r.path):
-                n.set_label(Text.assemble((r.name, "bold"), ("  ✗ not reachable: " + r.path, "#f7768e")))
+                n.set_label(Text.assemble((r.name, "bold"), ("  ✗ not reachable: " + r.path, "#f85149")))
             else:
                 self.load_dir(n)
                 n.expand()
@@ -497,7 +505,7 @@ class RecastApp(App):
     def file_label(self, path: str, size: int, m: MediaInfo | None) -> Text:
         key = norm(path)
         st = self._tree_status.get(key, "")
-        mark = {"done": ("✓ ", "#9ece6a"), "busy": ("● ", "#e0af68"), "wait": ("⚑ ", "#bb9af7")}.get(st, ("  ", ""))
+        mark = {"done": ("✓ ", "#3fb950"), "busy": ("● ", "#58a6ff"), "wait": ("⚑ ", "#d29922")}.get(st, ("  ", ""))
         root = self.root_for(path)
         depth = os.path.relpath(path, root.path).count(os.sep) + 1 if root else 3
         avail = self._tree_w - 3 * depth - 6  # tree guides indent each level
@@ -622,8 +630,8 @@ class RecastApp(App):
     def open_overview(self, root: Root, force: bool = False) -> None:
         if not os.path.isdir(root.path):
             self.query_one("#wins", DataTable).display = False
-            self._set_details(Text.assemble((root.name, "bold #c0caf5"), ("  " + root.path, "dim"), "\n\n",
-                                            ("✗ Can't reach this folder right now.", "bold #f7768e"), "\n",
+            self._set_details(Text.assemble((root.name, "bold #e6e6e6"), ("  " + root.path, "dim"), "\n\n",
+                                            ("✗ Can't reach this folder right now.", "bold #f85149"), "\n",
                                             "If it's a NAS share, make sure it's mounted (macOS unmounts shares "
                                             "after sleep sometimes), then press Refresh.", style=""))
             return
@@ -641,59 +649,9 @@ class RecastApp(App):
 
     @work(thread=True, group="scan", exclusive=True)
     def scan_library(self, root: str, relist: bool) -> None:
-        """Background: list files (once a day), read headers for new ones, rank. Never waits on the UI —
-        it publishes into self.overview and the UI timer redraws."""
+        """Background scan via the shared scanner; the UI timer redraws as results land."""
         worker = get_current_worker()
-        snap = None if relist else load_snapshot(root)
-        if snap:
-            entries = [tuple(e) for e in snap["files"]]
-        else:
-            self._scan = {"root": root, "phase": "listing", "done": 0, "total": 0}
-
-            def listed(n):
-                self._scan["done"] = n
-            entries = list_files(root, listed, lambda: worker.is_cancelled)
-            if worker.is_cancelled:
-                self._scan = None
-                return
-            save_snapshot(root, entries)
-        self._snap_when[root] = time.time() if not snap else snap["when"]
-        self._entries[root] = entries
-        infos = {}
-        todo = []
-        for p, size, mtime in entries:
-            m = self.probes.cached_meta(p, size, mtime)
-            if m:
-                infos[p] = m
-            else:
-                todo.append(p)
-        self._infos[root] = infos
-        self._scan = {"root": root, "phase": "reading", "done": 0, "total": len(todo), "t0": time.monotonic()}
-        self._publish_overview(root)
-        if todo:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            last = time.monotonic()
-            with ThreadPoolExecutor(max_workers=6) as pool:  # headers only; a few at a time is kind to the NAS
-                futs = {pool.submit(self.probes.get, p): p for p in todo}
-                for i, f in enumerate(as_completed(futs), 1):
-                    if worker.is_cancelled:
-                        for x in futs:
-                            x.cancel()
-                        self._scan = None
-                        return
-                    m = f.result()
-                    if not m.error:
-                        infos[futs[f]] = m
-                    self._scan["done"] = i
-                    if time.monotonic() - last > 5:
-                        last = time.monotonic()
-                        self._publish_overview(root)
-                    if i % 300 == 0:
-                        self.probes.save()  # a quit halfway keeps what was read
-            self.probes.save()
-        took = time.monotonic() - self._scan.get("t0", time.monotonic()) if self._scan else 0
-        self._scan = None
-        self._publish_overview(root)
+        took = self.scanner.scan(root, relist, lambda: worker.is_cancelled)
         top = next(iter(self.overview.get(root, [])), None)
         if took > 20 and top and top.saves > 0:
             self.call_from_thread(self.notify, f"Biggest win: {top.name} — {top.best} saves ≈{fsize(top.saves)}.\n"
@@ -708,23 +666,8 @@ class RecastApp(App):
         rate = sc["done"] / max(1e-3, time.monotonic() - sc["t0"])
         return f" · ~{fdur((sc['total'] - sc['done']) / rate)} left"
 
-    def _publish_overview(self, root: str) -> None:
-        """Rank (cheap: pure arithmetic on cached headers) and flag the UI to redraw."""
-        entries, infos = self._entries.get(root), self._infos.get(root, {})
-        if entries is None:
-            return
-        only = self.cfg.default_preset if self._rank_by == "★" else self._rank_by
-        if only is not None and only not in self.presets:
-            only = None
-        stats = rank(root, entries, infos, self.presets, self.cfg.encoders, self.engine.done_paths(),
-                     self.engine.measured, self._title_of(root), only=only, kind_of=self._series_type)
-        self.overview[root] = stats
-        self.show_stats.update({norm(st.path): st for st in stats})
-        self._overview_dirty = True
-
     def _series_type(self, path: str) -> str | None:
-        rec = self.arr.lookup(path) if self.arr else None
-        return (rec or {}).get("series_type") or None
+        return self.scanner.series_type(path)
 
     def action_rank_by(self) -> None:
         """Cycle what the biggest-wins table ranks by: your default preset → each other preset → best of all."""
@@ -750,29 +693,21 @@ class RecastApp(App):
             self.render_overview(d.root.path)
         self.badge_tree()
 
-    def _title_of(self, root: str):
-        nroot = norm(root)
-
-        def title(path: str) -> str:
-            t = show_root(path)
-            return t if norm(t).startswith(nroot) else root
-        return title
-
     def render_overview(self, root: str) -> None:
         d = self.current_node()
         if not d or norm(d.path) != norm(root):
             return
         r = next((x for x in self.cfg.roots if norm(x.path) == norm(root)), None)
         stats = self.overview.get(root, [])
-        head = [Text.assemble((r.name if r else root, "bold #c0caf5"), ("  " + root, "#9ece6a")),
+        head = [Text.assemble((r.name if r else root, "bold #e6e6e6"), ("  " + root, "#3fb950")),
                 Text("network share" if r and r.remote else "local disk", style="dim"), Text("")]
         sc = self._scan if self._scan and self._scan["root"] == root else None
         if sc and sc["phase"] == "listing":
-            head.append(Text(f"◐ listing your library… {sc['done']:,} video files so far", style="#e0af68"))
+            head.append(Text(f"◐ listing your library… {sc['done']:,} video files so far", style="#d29922"))
         elif sc and sc["total"]:
             head.append(Text(f"◐ reading file headers {sc['done']:,}/{sc['total']:,}{self._scan_eta(sc)} — first time "
                              "only, cached after this; the table fills in as it goes and you can keep using recast",
-                             style="#e0af68"))
+                             style="#d29922"))
         if stats:
             total = sum(s.size for s in stats)
             saves = sum(s.saves for s in stats)
@@ -781,9 +716,9 @@ class RecastApp(App):
             age = _ago(when).replace("since", "listed") if when else ""
             head.append(Text.assemble(("Biggest wins", "bold"), f"  ·  {len(stats)} shows · {n:,} files · {fsize(total)}",
                                       ("  ·  running it on everything would free ", "dim"),
-                                      (f"≈{fsize(saves)}", "bold #9ece6a"),
+                                      (f"≈{fsize(saves)}", "bold #3fb950"),
                                       (f"  ·  {age} · R rescans", "dim")))
-            head.append(Text.assemble(("Ranked by ", "dim"), (self._rank_label(), "#e0af68"),
+            head.append(Text.assemble(("Ranked by ", "dim"), (self._rank_label(), "#d29922"),
                                       ("  ·  p changes · ·m = measured from your encodes · Enter jumps · e encodes",
                                        "dim")))
             groups = duplicate_groups(stats)
@@ -792,7 +727,7 @@ class RecastApp(App):
                 head.append(Text(f"⧉ {len(groups)} shows are spread over several folders ({ex}"
                                  + ("…" if len(groups) > 6 else "") + "). Some are leftover duplicate downloads, some "
                                  "are season packs never moved into the show's folder — worth tidying (rows marked ⧉).",
-                                 style="#e0af68"))
+                                 style="#d29922"))
         elif not sc:
             head.append(Text("No video files found here.", style="dim"))
         self._set_details(Group(*head))
@@ -822,12 +757,12 @@ class RecastApp(App):
                 codecs.append(" ")
             pct = s.saves / max(1, s.size)
             saves = Text(f"{fsize(s.saves)} {-pct * 100:.0f}%" if s.saves > 0 else "—",
-                         style="bold #9ece6a" if pct >= 0.3 else "#9ece6a" if s.saves > 0 else "dim")
+                         style="bold #3fb950" if pct >= 0.3 else "#3fb950" if s.saves > 0 else "dim")
             name = Text(s.name + (" ✓" * bool(s.done)) + (" ⧉" if s.dup_of else ""),
                         style="" if s.saves > 0 else "dim", no_wrap=True, overflow="ellipsis")
             cells = {"show": name, "size": fsize(s.size), "files": str(s.files), "codecs": codecs,
                      "preset": Text((s.best or "nothing to gain") + (" ·m" if s.measured else ""),
-                                    style="#e0af68" if s.best else "dim", no_wrap=True, overflow="ellipsis"),
+                                    style="#d29922" if s.best else "dim", no_wrap=True, overflow="ellipsis"),
                      "saves": saves}
             t.add_row(*(cells[k] for k, _, _ in cols), key=s.path)
 
@@ -853,13 +788,13 @@ class RecastApp(App):
         if s:
             t.append(f"  {fsize(s.size)}", "dim")
             if s.saves >= 1024**3:
-                t.append(f"  save ≈{fsize(s.saves)}", "#9ece6a")
+                t.append(f"  save ≈{fsize(s.saves)}", "#3fb950")
         return t
 
     def welcome(self) -> Text:
-        k = lambda x: (x, "bold #7dcfff")
+        k = lambda x: (x, "bold #58a6ff")
         return Text.assemble(
-            ("Welcome to recast\n\n", "bold #bb9af7"),
+            ("Welcome to recast\n\n", "bold #e6e6e6"),
             k("↑ ↓"), " or the mouse to browse · ", k("Enter / →"), " opens a folder · ", k("/"), " finds a show\n\n",
             "Highlight a ", ("show or season", "bold"), " to see what every preset would save.\n",
             "Highlight an ", ("episode", "bold"), " and press ", k("e"), " (or double-click) to encode it — when it's done "
@@ -873,9 +808,9 @@ class RecastApp(App):
 
     def file_details(self, m: MediaInfo, d: Node, rec, ep) -> Group:
         if m.error:
-            return Group(Text(os.path.basename(d.path), style="bold"), Text(f"✗ {m.error}", style="#f7768e"))
+            return Group(Text(os.path.basename(d.path), style="bold"), Text(f"✗ {m.error}", style="#f85149"))
         g = Table.grid(padding=(0, 2))
-        g.add_column(style="#565f89", width=9)
+        g.add_column(style="#6e6e73", width=9)
         g.add_column()
         g.add_row("Video", Text.assemble(badge(m.codec), f" {m.profile} · {m.width}×{m.height} · {m.fps:g} fps · "
                                          f"{m.vkbps:,} kb/s" + (f" · {m.hdr}" if m.hdr else "")))
@@ -884,11 +819,11 @@ class RecastApp(App):
         g.add_row("Length", f"{fdur(m.duration)}  ·  {m.frames:,} frames" +
                   ("  ·  interlaced (use a preset with Deinterlace on)" if m.interlaced else ""))
         g.add_row("Size", fsize(m.size))
-        g.add_row("Where", Text(d.path, style="#9ece6a"))
+        g.add_row("Where", Text(d.path, style="#3fb950"))
         g.add_row("Access", "network share → copied to scratch first" if d.root.remote else "local disk — read in place")
-        parts = [Text(os.path.basename(d.path), style="bold #c0caf5")]
+        parts = [Text(os.path.basename(d.path), style="bold #e6e6e6")]
         if rec:
-            t = Text(f"◆ {rec['source']}  ", style="bold #7dcfff")
+            t = Text(f"◆ {rec['source']}  ", style="bold #58a6ff")
             t.append(f"{rec['title']}" + (f" ({rec['year']})" if rec.get("year") else ""))
             if ep:
                 t.append(f" · S{ep['season']:02}E{ep['episode']:02} “{ep['title']}” · aired {ep['aired']} · {ep['quality']}")
@@ -901,10 +836,10 @@ class RecastApp(App):
             when = time.strftime("%b %d", time.localtime(h.get("when", 0)))
             t = Text(f"✓ re-encoded by recast on {when} with {h['preset']}: {fsize(h['src_size'])} → "
                      f"{fsize(h['out_size'])} ({(h['out_size'] / max(1, h['src_size']) - 1) * 100:+.0f}%)",
-                     style="#9ece6a")
+                     style="#3fb950")
             orig = h.get("orig", "")
             if orig and os.path.exists(orig):
-                t.append("\n↶ original kept in the trash — press u to put it back", style="#7dcfff")
+                t.append("\n↶ original kept in the trash — press u to put it back", style="#58a6ff")
             parts += [Text(""), t]
             return Group(*parts)
         parts += [Text(""), self.preset_gains([m], d.path)]
@@ -944,13 +879,13 @@ class RecastApp(App):
             why = idle[0][6] if idle else ""
             return Text(("✓ Nothing left to gain here — " + ("all done by recast" if "done" in why else
                                                                "no preset would make these files smaller")),
-                        style="#9ece6a")
+                        style="#3fb950")
         t = Table(box=None, padding=(0, 1), header_style="bold dim", title_justify="left",
                   title=Text("What each preset would do", style="bold"), show_edge=False, expand=False)
         one_line = {"no_wrap": True, "overflow": "ellipsis"}
         compact = self._details_w < 72  # small terminal: keep the columns that matter
         cols = (("", {"width": 2}), ("Preset", {"max_width": 26, "ratio": 3, **one_line}),
-                ("Encoder", {"style": "#7dcfff", "max_width": 14, **one_line}),
+                ("Encoder", {"style": "#58a6ff", "max_width": 14, **one_line}),
                 ("Files", {"justify": "right", **one_line}), ("After", {"justify": "right", **one_line}),
                 ("Saves", {"justify": "right", **one_line}), ("", {"style": "dim", **one_line}))
         keep = (0, 1, 5, 6) if compact else tuple(range(7))
@@ -958,21 +893,21 @@ class RecastApp(App):
             t.add_column(cols[i][0], **cols[i][1])
         best = next((r for r in rows if r[0] < 0), None)
         for pct, name, s, n, src, out, how in rows:
-            mark = Text.assemble(("★" if name == self.cfg.default_preset else " ", "#e0af68"),
-                                 ("◆" if name == last_name or last and name == last["preset"] else " ", "#bb9af7"))
-            col = "bold #9ece6a" if pct <= -0.10 else "#e0af68" if pct < 0 else "bold #f7768e"
+            mark = Text.assemble(("★" if name == self.cfg.default_preset else " ", "#d29922"),
+                                 ("◆" if name == last_name or last and name == last["preset"] else " ", "#58a6ff"))
+            col = "bold #3fb950" if pct <= -0.10 else "#d29922" if pct < 0 else "bold #f85149"
             row = (mark, Text(name, style="bold" if best and name == best[1] else ""),
                    resolve_encoder(s, caps)[0].replace("_videotoolbox", "_vt"), str(n), f"≈{fsize(out)}",
                    Text(f"{pct * 100:+.0f}%", style=col),
                    Text(how.replace("estimate", "est.").replace("measured · ", "✓ "),
-                        style="#9ece6a" if how.startswith("measured") else "dim"))
+                        style="#3fb950" if how.startswith("measured") else "dim"))
             t.add_row(*(row[i] for i in keep))
         summary = Text()
         dflt = next((r for r in rows if r[1] == self.cfg.default_preset and r[0] != 9.0), None)
         for label, r in (("best", best), ("default", dflt if dflt is not best else None)):
             if r and r[0] < 0:
                 summary.append(f"{label}: ", "dim")
-                summary.append(f"{r[1]} saves {fsize(r[4] - r[5])}", "bold #9ece6a" if label == "best" else "#9ece6a")
+                summary.append(f"{r[1]} saves {fsize(r[4] - r[5])}", "bold #3fb950" if label == "best" else "#3fb950")
                 summary.append("   ")
         legend = Text("★ default  ◆ last used here  · measured = from files you've actually encoded in this show",
                       style="dim")
@@ -982,10 +917,10 @@ class RecastApp(App):
         return Group(*parts, legend)
 
     def folder_details(self, d: Node, files, rec, probed: bool, progress=None, is_root=False) -> Group:
-        parts = [Text(os.path.basename(d.path.rstrip("/\\")) or d.path, style="bold #c0caf5"),
-                 Text(d.path, style="#9ece6a")]
+        parts = [Text(os.path.basename(d.path.rstrip("/\\")) or d.path, style="bold #e6e6e6"),
+                 Text(d.path, style="#3fb950")]
         if rec:
-            info = Text(f"◆ {rec['source']}  ", style="bold #7dcfff")
+            info = Text(f"◆ {rec['source']}  ", style="bold #58a6ff")
             info.append(" · ".join(str(rec[k]) for k in ("title", "status", "profile", "episodes", "quality")
                                    if rec.get(k)))
             parts.append(info)
@@ -1004,8 +939,10 @@ class RecastApp(App):
             for m in infos:
                 by[m.codec] = by.get(m.codec, 0) + m.size
             bar, leg = Text(), Text()
-            for c, b in sorted(by.items(), key=lambda kv: -kv[1]):
-                bar.append("█" * max(1, round(b / total * 50)), CODEC_STYLE.get(c, "").split(" on ")[-1] or "#a9b1d6")
+            for i, (c, b) in enumerate(sorted(by.items(), key=lambda kv: -kv[1])):
+                shade = SHADES[min(i, len(SHADES) - 1)]
+                bar.append("█" * max(1, round(b / total * 50)), shade)
+                leg.append("■ ", shade)
                 leg.append_text(badge(c))
                 leg.append(f" {fsize(b)}  ")
             parts += [bar, leg]
@@ -1020,7 +957,7 @@ class RecastApp(App):
             if busy:
                 extra.append(f"● {busy} in the queue / awaiting approval")
             if extra:
-                parts.append(Text("  ·  ".join(extra), style="#9ece6a"))
+                parts.append(Text("  ·  ".join(extra), style="#3fb950"))
             partial = len(infos) < len(files)
             parts += [Text(""), self.preset_gains(infos, d.path)]
             if partial:
@@ -1091,11 +1028,11 @@ class RecastApp(App):
         if settings is None and last and last["preset"].rstrip("*") in self.presets:
             preset, settings = last["preset"].rstrip("*"), EncodeSettings(**last["settings"])
             m = self.engine.measured(path).get(last["preset"])
-            note = Text.assemble(("◆ Last used on this show: ", "#bb9af7"), (last["preset"], "bold"),
+            note = Text.assemble(("◆ Last used on this show: ", "#58a6ff"), (last["preset"], "bold"),
                                  (f" — {os.path.basename(last['src'])}", "dim"),
-                                 (f"  {(m[0] - 1) * 100:+.0f}% measured" if m else "", "#9ece6a"),
+                                 (f"  {(m[0] - 1) * 100:+.0f}% measured" if m else "", "#3fb950"),
                                  ("  (still in progress)" if last.get("pending") else "", "dim"))
-        title = Text.assemble(("Encode  ", "bold"), (path, "bold #c0caf5"), "   ")
+        title = Text.assemble(("Encode  ", "bold"), (path, "bold #e6e6e6"), "   ")
         if len(infos) == 1:
             m = infos[0]
             title.append_text(badge(m.codec))
@@ -1437,11 +1374,11 @@ class RecastApp(App):
         elif what == "retry":
             if isinstance(item, Batch):
                 files = [j.media for j in self.engine.batch_jobs(item)]
-                title = Text.assemble(("Retry  ", "bold"), (item.folder, "bold #c0caf5"))
+                title = Text.assemble(("Retry  ", "bold"), (item.folder, "bold #e6e6e6"))
                 self.open_dialog(title, files, item.s, item.preset.rstrip("*"), item.folder,
                                  lambda: self.engine.deny(item))
             else:
-                title = Text.assemble(("Retry  ", "bold"), (item.src, "bold #c0caf5"))
+                title = Text.assemble(("Retry  ", "bold"), (item.src, "bold #e6e6e6"))
                 self.open_dialog(title, [item.media], item.s, item.preset.rstrip("*"), None,
                                  lambda: self.engine.deny(item))
         self.refresh_inbox()
@@ -1545,7 +1482,7 @@ class RecastApp(App):
             d.update(self.batch_view(item))
         else:
             btn.label = "✓ Approve & replace  y"
-            d.update(Group(Text(item.name, style="bold #c0caf5"),
+            d.update(Group(Text(item.name, style="bold #e6e6e6"),
                            Text(f"{item.src}\npreset: {item.preset} · {_ago(item.waiting_since)}", style="dim"),
                            Text(""), compare_table(item, self.cfg.encoders), Text(""),
                            Text("✓ approve → copy back, original → " + {"trash": ".recast-trash", "keep": ".orig",
@@ -1566,22 +1503,22 @@ class RecastApp(App):
         status = Text()
         live = next((j for j in rem if j.stage in LIVE), None)
         if rem:
-            status.append(f"encoding {len(done)}/{len(todo)}", "bold #e0af68")
+            status.append(f"encoding {len(done)}/{len(todo)}", "bold #d29922")
             if live and live.speed:
                 left = sum(j.info.get("duration", 0) for j in rem) - live.out_time
                 status.append(f" · ETA ≈{fdur(left / live.speed)}")
             status.append(" · ")
         else:
-            status.append(f"all {len(todo)} encoded · waiting for your OK · ", "bold #bb9af7")
+            status.append(f"all {len(todo)} encoded · waiting for your OK · ", "bold #d29922")
         status.append(f"scratch holding {fsize(held)} of {self.cfg.max_scratch_gb} GiB", "dim")
         t = Table(box=None, padding=(0, 2), header_style="bold")
         for c in ("", "Source", "Output"):
             t.add_column(c)
         t.add_row("Files", f"{len(done)} done", Text.assemble(f"{len(done) - len(flagged)} pass · ",
-                                                              (f"{len(flagged)} flagged", "bold #e0af68" if flagged else "dim")))
-        t.add_row("Size so far", fsize(src), Text(f"{fsize(out)}  ({(ratio - 1) * 100:+.0f}%)", style="bold #9ece6a"))
+                                                              (f"{len(flagged)} flagged", "bold #d29922" if flagged else "dim")))
+        t.add_row("Size so far", fsize(src), Text(f"{fsize(out)}  ({(ratio - 1) * 100:+.0f}%)", style="bold #3fb950"))
         t.add_row("Whole batch", fsize(all_src), Text.assemble(f"≈{fsize(all_src * ratio)}  ",
-                                                               (f"saves ≈{fsize(all_src * (1 - ratio))}", "bold #9ece6a")))
+                                                               (f"saves ≈{fsize(all_src * (1 - ratio))}", "bold #3fb950")))
         t.add_row("Encoder", "", resolve_encoder(b.s, self.cfg.encoders)[0])
         f = Table(box=None, padding=(0, 2), header_style="bold dim")
         for c in ("File", "Source", "Output", "Δ", "Check"):
@@ -1590,8 +1527,8 @@ class RecastApp(App):
         for j in rows[:14]:
             dd = j.out_size / max(1, j.info.get("size", 1)) - 1
             f.add_row(j.name[:36], fsize(j.info.get("size", 0)), fsize(j.out_size),
-                      Text(f"{dd * 100:+.0f}%", style="#9ece6a" if dd < 0 else "#f7768e"),
-                      Text(f"⚑ {j.flag}", style="#e0af68") if j.flag else Text("✓", style="#9ece6a"))
+                      Text(f"{dd * 100:+.0f}%", style="#3fb950" if dd < 0 else "#f85149"),
+                      Text(f"⚑ {j.flag}", style="#d29922") if j.flag else Text("✓", style="#3fb950"))
         n_pass = len(done) - len(flagged)
         foot = Text(f"✓ Approve batch → replaces the {n_pass} passing file{'s' * (n_pass != 1)} now"
                     + (", then the rest as each passes checks" if rem else "") + ".\n"
@@ -1599,8 +1536,8 @@ class RecastApp(App):
                     "✗ Deny → discards outputs and cancels what's left. Originals are never touched.  c compares frames",
                     style="dim")
         more = Text(f"… and {len(rows) - 14} more" if len(rows) > 14 else "", style="dim")
-        return Group(Text.assemble(("▤ ", "#bb9af7"), (_short(b.folder), "bold #c0caf5"), "  ",
-                                   (f"batch · {len(todo)} files · {b.preset}", "#e0af68")),
+        return Group(Text.assemble(("▤ ", "#8b8b92"), (_short(b.folder), "bold #e6e6e6"), "  ",
+                                   (f"batch · {len(todo)} files · {b.preset}", "#d29922")),
                      Text(b.folder, style="dim"), status, Text(""), t, Text(""), f, more, Text(""), foot)
 
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
@@ -1623,9 +1560,9 @@ class RecastApp(App):
             lv.index = names.index(select) if select in names else min(idx, len(names) - 1)
             self.load_preset_doc(names[lv.index])
         self.query_one("#preset-help", Static).update(Text.assemble(
-            "Start typing a field or value — suggestions pop up, ", ("Tab", "bold #7dcfff"), " completes (with quotes "
-            "and commas), ", ("↑↓", "bold #7dcfff"), " picks, ", ("ctrl+space", "bold #7dcfff"),
-            " opens the list. Red = not usable on this machine. Files: ", (str(self._presets_path()), "#9ece6a")))
+            "Start typing a field or value — suggestions pop up, ", ("Tab", "bold #58a6ff"), " completes (with quotes "
+            "and commas), ", ("↑↓", "bold #58a6ff"), " picks, ", ("ctrl+space", "bold #58a6ff"),
+            " opens the list. Red = not usable on this machine. Files: ", (str(self._presets_path()), "#3fb950")))
         sel = self.query_one("#s-default", Select)
         sel.set_options([(k, k) for k in names])
         if self.cfg.default_preset in names:
@@ -1654,9 +1591,9 @@ class RecastApp(App):
         t = Text()
         for row, msg in ed.diagnostics[:4]:
             t.append(f"line {row + 1}: ", "dim")
-            t.append(msg + "\n", "dim italic" if msg.startswith("…") else "#f7768e")
+            t.append(msg + "\n", "dim italic" if msg.startswith("…") else "#f85149")
         if not ed.diagnostics:
-            t.append("✓ valid", "#9ece6a")
+            t.append("✓ valid", "#3fb950")
         self.query_one("#preset-diag", Static).update(t)
 
     def action_save_preset(self) -> None:
@@ -1723,9 +1660,9 @@ class RecastApp(App):
         t.append(f"\nffmpeg {self.cfg.ffmpeg_version} · {self.cfg.ffmpeg} · detected {self.cfg.detected_at}\n", "dim")
         for name, cap in self.cfg.encoders.items():
             if cap.status == "ok":
-                t.append(f"{name} ✓ {cap.fps:.0f}fps  ", "#9ece6a")
+                t.append(f"{name} ✓ {cap.fps:.0f}fps  ", "#3fb950")
             elif cap.status == "failed":
-                t.append(f"{name} ✗  ", "#f7768e")
+                t.append(f"{name} ✗  ", "#f85149")
         self.query_one("#s-machine", Static).update(t)
         rt = self.query_one("#roots", DataTable)
         rt.clear()
@@ -1879,19 +1816,19 @@ class RecastApp(App):
         else:
             p = j.progress
         prog = Text("") if j.stage in ("queued", "skipped", "cancelled", "failed") else \
-            Text(f"{pct_bar(p)} {p * 100:3.0f}%", style="#e0af68" if j.stage == "encoding" else "dim")
+            Text(f"{pct_bar(p)} {p * 100:3.0f}%", style="#d29922" if j.stage == "encoding" else "dim")
         fps = f"{j.fps:.0f}" if j.stage == "encoding" else ""
         if j.out_size:
             proj = j.projected if j.stage in LIVE else j.out_size
             d = (proj or j.out_size) / size - 1
-            sz = Text.assemble(f"{fsize(j.out_size)} ", (f"{d * 100:+.0f}%", "#9ece6a" if d < 0 else "#f7768e"))
+            sz = Text.assemble(f"{fsize(j.out_size)} ", (f"{d * 100:+.0f}%", "#3fb950" if d < 0 else "#f85149"))
         else:
             sz = Text(fsize(size), style="dim")
         eta = fdur((j.info.get("duration", 0) - j.out_time) / j.speed) if j.stage == "encoding" and j.speed else ""
-        name = Text.assemble(("▤ " if j.batch else "  ", "#bb9af7"), _mid(j.name, 42))
+        name = Text.assemble(("▤ " if j.batch else "  ", "#8b8b92"), _mid(j.name, 42))
         stage = Text(label, style=style)
         if j.flag and j.stage == "awaiting":
-            stage = Text("⚑ flagged", style="bold #e0af68")
+            stage = Text("⚑ flagged", style="bold #d29922")
         return [str(j.id), name, Text(j.preset[:24], style="dim"), stage, prog, fps, sz, eta]
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
@@ -1957,47 +1894,47 @@ class RecastApp(App):
 
     def update_topbar(self) -> None:
         t = Text()
-        t.append("◆ recast ", "bold #bb9af7")
+        t.append("◆ recast ", "bold #e6e6e6")
         t.append(" │ ", "dim")
-        t.append(f"{self.cfg.machine.get('host', '')} ", "bold #c0caf5")
-        t.append(resolve_encoder(EncodeSettings(), self.cfg.encoders)[0], "#7dcfff")
+        t.append(f"{self.cfg.machine.get('host', '')} ", "bold #e6e6e6")
+        t.append(resolve_encoder(EncodeSettings(), self.cfg.encoders)[0], "#58a6ff")
         t.append(" │ ", "dim")
         saved = sum(h["src_size"] - h["out_size"] for h in self.engine.history if not h.get("restored"))
         if saved > 0:
             t.append("saved ", "dim")
-            t.append(fsize(saved), "bold #9ece6a")
+            t.append(fsize(saved), "bold #3fb950")
             t.append(" │ ", "dim")
         held = self.engine.held_bytes()
         t.append("scratch ", "dim")
-        t.append(fsize(held), "#f7768e" if held > self.cfg.max_scratch_gb * 1024**3 * 0.8 else "#9ece6a")
+        t.append(fsize(held), "#f85149" if held > self.cfg.max_scratch_gb * 1024**3 * 0.8 else "#3fb950")
         if self.arr:
             t.append(" │ ", "dim")
             for kind in self.arr.clients:
                 ok = kind not in self.arr.errors
-                t.append(f"{'●' if ok else '○'} {kind} ", "#9ece6a" if ok else "#f7768e")
+                t.append(f"{'●' if ok else '○'} {kind} ", "#3fb950" if ok else "#f85149")
         if self._scan and (self._scan["total"] or self._scan["phase"] == "listing"):
             t.append(" │ ", "dim")
             sc = self._scan
             t.append(f"◐ scanning {sc['done']:,}" + (f"/{sc['total']:,}" if sc["total"] else "") + self._scan_eta(sc),
-                     "#e0af68")
+                     "#d29922")
         if self.engine.hold:
             t.append(" │ ", "dim")
-            t.append("❚❚ queue paused (space)", "bold #e0af68")
+            t.append("❚❚ queue paused (space)", "bold #d29922")
         if self.engine.offline:
             t.append(" │ ", "dim")
-            t.append("⚠ library offline", "bold #f7768e")
+            t.append("⚠ library offline", "bold #f85149")
         n = len(self.engine.inbox())
         if n:
             t.append(" │ ", "dim")
-            t.append(f"⚑ {n} awaiting approval", "bold #bb9af7")
+            t.append(f"⚑ {n} awaiting approval", "bold #d29922")
         enc = next((j for j in self.engine.jobs.values() if j.stage in ("encoding", "paused", "copying")), None)
         if enc:
             t.append(" │ ", "dim")
             if enc.stage == "copying":
-                t.append(f"⇣ {enc.name[:22]} {enc.copied / max(1, enc.info.get('size', 1)) * 100:.0f}%", "#7dcfff")
+                t.append(f"⇣ {enc.name[:22]} {enc.copied / max(1, enc.info.get('size', 1)) * 100:.0f}%", "#58a6ff")
             else:
                 t.append(f"{'❚❚' if enc.stage == 'paused' else '▶'} {enc.name[:22]} "
-                         f"{enc.phase + ' ' if enc.phase else ''}{enc.progress * 100:.0f}% {enc.fps:.0f}fps", "#e0af68")
+                         f"{enc.phase + ' ' if enc.phase else ''}{enc.progress * 100:.0f}% {enc.fps:.0f}fps", "#d29922")
         self.query_one("#topbar", Static).update(t)
 
     def update_queue_title(self) -> None:
@@ -2022,14 +1959,14 @@ class RecastApp(App):
             if not self.engine.jobs:
                 self.query_one("#jd-title", Static).update(Text.assemble(
                     ("Nothing queued yet.\n\n", "bold"),
-                    "Go to ", ("Library", "bold #7dcfff"), " (press 1), highlight an episode, season or show, and press ",
-                    ("e", "bold #7dcfff"), ".\nEncodes show up here with live progress and the frame being encoded."))
+                    "Go to ", ("Library", "bold #58a6ff"), " (press 1), highlight an episode, season or show, and press ",
+                    ("e", "bold #58a6ff"), ".\nEncodes show up here with live progress and the frame being encoded."))
                 self.query_one("#jd-pipeline", Static).update("")
             return
         m = j.info
-        title = Text.assemble((f"#{j.id}  ", "dim"), (j.name, "bold #c0caf5"), "  ", badge(m.get("codec", "?")), " → ",
-                              badge(CODEC_LABEL.get(j.s.codec, "?")), (f"   {j.preset}", "#e0af68"),
-                              ("   ▤ batch" if j.batch else "", "#bb9af7"))
+        title = Text.assemble((f"#{j.id}  ", "dim"), (j.name, "bold #e6e6e6"), "  ", badge(m.get("codec", "?")), " → ",
+                              badge(CODEC_LABEL.get(j.s.codec, "?")), (f"   {j.preset}", "#d29922"),
+                              ("   ▤ batch" if j.batch else "", "#8b8b92"))
         self.query_one("#jd-title", Static).update(title)
         idx = {"queued": -1, "copying": 0, "ready": 1, "encoding": 1, "paused": 1, "verifying": 2, "awaiting": 3,
                "to_replace": 3, "replacing": 3, "replaced": 4, "kept": 4, "discarded": 4, "skipped": -1,
@@ -2041,15 +1978,15 @@ class RecastApp(App):
         for i, nm in enumerate(names):
             p.append(" ─── " if i else "", "dim")
             if i < idx:
-                p.append(f"✓ {nm}", "#9ece6a")
+                p.append(f"✓ {nm}", "#3fb950")
             elif i == idx:
-                p.append(f"{spin} {nm}", "bold #e0af68")
+                p.append(f"{spin} {nm}", "bold #d29922")
             else:
                 p.append(f"○ {nm}", "dim")
         if j.stage == "failed":
-            p.append(f"\n✗ {j.error}", "bold #f7768e")
+            p.append(f"\n✗ {j.error}", "bold #f85149")
         elif j.flag:
-            p.append(f"\n⚑ {j.flag}", "#e0af68")
+            p.append(f"\n⚑ {j.flag}", "#d29922")
         self.query_one("#jd-pipeline", Static).update(p)
         size = m.get("size", 1) or 1
         copied = j.copied if j.stage == "copying" else (size if idx >= 1 or not j.remote else 0)
@@ -2072,14 +2009,14 @@ class RecastApp(App):
         g = Table.grid(padding=(0, 3))
         for _ in range(4):
             g.add_column()
-        k = lambda s: Text(s, style="#565f89")
+        k = lambda s: Text(s, style="#6e6e73")
         live = j.stage in ("encoding", "paused")
         proj = j.projected if live else j.out_size
         g.add_row(k("fps"), Text(f"{j.fps:.0f}" if live else "—", style="bold"),
                   k("speed"), Text(f"{j.speed:.2f}×" if live else "—", style="bold"))
-        g.add_row(k("output"), Text(fsize(j.out_size), style="bold #e0af68"), k("projected"),
+        g.add_row(k("output"), Text(fsize(j.out_size), style="bold #d29922"), k("projected"),
                   Text.assemble(f"≈{fsize(proj)} " if proj else "—",
-                                (f"({(proj / size - 1) * 100:+.0f}%)" if proj else "", "#9ece6a")))
+                                (f"({(proj / size - 1) * 100:+.0f}%)" if proj else "", "#3fb950")))
         g.add_row(k("source"), fsize(size), k("bitrate"), f"{j.kbps:,.0f} kb/s" if live and j.kbps else "—")
         eta = fdur((m.get("duration", 0) - j.out_time) / j.speed) if live and j.speed else "—"
         g.add_row(k("eta"), Text(eta, style="bold"), k("elapsed"),
@@ -2087,7 +2024,7 @@ class RecastApp(App):
                   if j.started else "—")
         self.query_one("#jd-stats", Static).update(g)
         self.query_one("#jd-spark", Sparkline).data = j.spark[-120:] or [0]
-        self.query_one("#jd-log", Static).update(Text("\n".join(j.log[-8:]), style="#565f89", no_wrap=True,
+        self.query_one("#jd-log", Static).update(Text("\n".join(j.log[-8:]), style="#6e6e73", no_wrap=True,
                                                       overflow="ellipsis"))
 
     def update_frame(self) -> None:

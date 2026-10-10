@@ -71,9 +71,11 @@ def install_command(rel: dict) -> list[str]:
     git = f"git+https://github.com/{REPO}@{rel['tag']}"
     spec = rel.get("wheel") or f"recast @ {git}"
     prefix = sys.prefix.replace("\\", "/")
-    if "/uv/tools/" in prefix and shutil.which("uv"):
+    uv = os.path.exists(os.path.join(sys.prefix, "uv-receipt.toml")) or "/uv/tools/" in prefix
+    pipx = os.path.exists(os.path.join(sys.prefix, "pipx_metadata.json")) or "/pipx/venvs/" in prefix
+    if uv and shutil.which("uv"):
         return ["uv", "tool", "install", "--force", spec]
-    if "/pipx/venvs/" in prefix and shutil.which("pipx"):
+    if pipx and shutil.which("pipx"):
         return ["pipx", "install", "--force", rel.get("wheel") or git]
     return [sys.executable, "-m", "pip", "install", "--upgrade", spec]
 

@@ -58,3 +58,18 @@ def test_imports_the_terminal_apps_settings_once(monkeypatch, tmp_path):
     assert (srv / "presets" / "Mine.json").exists() and (srv / "probe-cache.json").exists()
     assert not (srv / "state.json").exists()                              # queue + history stay with the app
     assert not import_terminal_settings()                                 # only the first time
+
+
+def test_update_uses_whatever_installed_recast(monkeypatch, tmp_path):
+    from recast import update
+    rel = {"version": "9.9.9", "tag": "v9.9.9", "wheel": "https://example/recast-9.9.9-py3-none-any.whl"}
+    (tmp_path / "uv-receipt.toml").write_text("")
+    monkeypatch.setattr(update.sys, "prefix", str(tmp_path))
+    monkeypatch.setattr(update.shutil, "which", lambda name: "/usr/bin/" + name)
+    assert update.install_command(rel) == ["uv", "tool", "install", "--force", rel["wheel"]]
+    (tmp_path / "uv-receipt.toml").unlink()
+    (tmp_path / "pipx_metadata.json").write_text("{}")
+    assert update.install_command(rel)[:3] == ["pipx", "install", "--force"]
+    (tmp_path / "pipx_metadata.json").unlink()
+    assert update.install_command({**rel, "wheel": ""})[-1] == "recast @ git+https://github.com/awpsec/recast@v9.9.9"
+    assert update.parse_version("v0.10.0") > update.parse_version("0.9.3")

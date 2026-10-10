@@ -80,6 +80,7 @@ const parentName = (p) => {
 };
 const enc = encodeURIComponent;
 const num = (n) => (n == null ? "—" : Number(n).toLocaleString());
+const plural = (n, word) => `${num(n)} ${word}${n === 1 ? "" : "s"}`;
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 const store = {
   get(k, d) { try { const v = localStorage.getItem("recast." + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -191,28 +192,26 @@ async function getPresets(force) {
 
 function renderShell() {
   const nav = h("nav", { class: "nav" }, NAV.map(([id, label]) =>
-    h("a", { href: "#/" + id, "data-id": id }, icon(id), h("span", { class: "label" }, label),
-      h("span", { class: "count hidden", "data-count": id }))));
-  const side = h("aside", { class: "side" },
-    h("div", { class: "brand" }, h("div", { class: "brand-mark" }, "r"), h("span", {}, "recast")), nav,
-    h("div", { class: "side-foot" },
-      h("span", { class: "conn" }, h("i", { class: "dot", id: "conn-dot" }), h("span", { id: "conn-text" }, "connecting…")),
-      h("span", { id: "machine", class: "trunc" }),
-      S.info.update ? h("a", { href: "#/settings", class: "blue", style: "font-size:12px;text-decoration:none", title: "docker compose pull && docker compose up -d" }, `↑ v${S.info.update.version} available`)
-        : h("span", { class: "dim", style: "font-size:12px" }, `v${S.info.version || ""}`)));
-  const top = h("header", { class: "topbar" },
-    h("a", { href: "#/automation", id: "tb-auto", class: "badge", style: "text-decoration:none" }),
-    h("span", { id: "tb-auto-status", class: "muted trunc", style: "max-width:340px;font-size:13px" }),
-    h("span", { class: "spacer" }),
+    h("a", { href: "#/" + id, "data-id": id, title: label }, icon(id), h("span", { class: "label" }, label), h("span", { class: "count hidden", "data-count": id }))));
+  const top = h("header", { class: "top" }, h("div", { class: "wrap top-in" },
+    h("a", { class: "brand", href: "#/dashboard" }, h("div", { class: "brand-mark" }, "r"), h("span", {}, "recast")),
+    nav,
+    h("div", { class: "top-right" },
+      h("span", { class: "conn", id: "conn", title: "connecting…" }, h("i", { class: "dot", id: "conn-dot" }), h("span", { id: "conn-text" })),
+      S.info.update ? h("a", { href: "#/settings", class: "upd hide-sm", title: "docker compose pull && docker compose up -d" }, `↑ v${S.info.update.version}`) : null,
+      h("button", { class: "btn sm", id: "tb-hold", onclick: toggleHold }, "Pause"))));
+  const status = h("div", { class: "wrap statusline" },
+    h("a", { href: "#/automation", id: "tb-auto", class: "badge" }),
+    h("span", { id: "tb-auto-status", class: "trunc" }),
     h("span", { class: "stat", id: "tb-encoding" }),
     h("span", { class: "stat" }, "Saved", h("b", { id: "tb-saved", class: "green" }, "—")),
-    h("span", { class: "stat hide-sm" }, "Scratch", h("b", { id: "tb-scratch" }, "—")),
-    h("button", { class: "btn sm", id: "tb-hold", onclick: toggleHold }, "Pause"));
-  const main = h("div", { class: "main" }, top, h("div", { id: "banners" }), h("div", { class: "page", id: "page" }));
-  $("#app").replaceChildren(h("div", { class: "shell" }, side, main));
+    h("span", { class: "stat hide-sm" }, "Scratch", h("b", { id: "tb-scratch" }, "—")));
   const m = S.info.machine || {};
-  $("#machine").textContent = [m.host, S.info.hevc_encoder].filter(Boolean).join(" · ");
-  $("#machine").title = [m.os, m.cpu, m.gpu].filter(Boolean).join(" · ");
+  const foot = h("footer", { class: "wrap foot" },
+    h("span", { title: [m.os, m.cpu, m.gpu].filter(Boolean).join(" · ") }, [m.host, S.info.hevc_encoder].filter(Boolean).join(" · ")),
+    h("span", {}, `recast-server v${S.info.version || ""}`),
+    S.info.update ? h("a", { href: S.info.update.url, target: "_blank", rel: "noopener" }, `v${S.info.update.version} is out`) : null);
+  $("#app").replaceChildren(top, status, h("div", { class: "wrap", id: "banners" }), h("main", { class: "wrap page", id: "page" }), foot);
 }
 
 async function toggleHold() {
@@ -240,7 +239,7 @@ function updateChrome(live) {
     $("#tb-scratch").textContent = fsize(live.scratch);
     const enc = live.active.find((j) => j.stage === "encoding");
     const te = $("#tb-encoding");
-    te.replaceChildren(...(enc ? [h("i", { class: "dot blue pulse" }), h("b", { class: "trunc", style: "max-width:220px" }, enc.name), pct(enc.progress)] : []));
+    te.replaceChildren(...(enc ? [h("i", { class: "dot blue pulse" }), h("span", { class: "trunc", style: "max-width:260px", title: enc.name }, enc.name), h("b", {}, pct(enc.progress))] : []));
     const hb = $("#tb-hold");
     hb.textContent = live.hold ? "Resume" : "Pause";
     hb.className = "btn sm" + (live.hold ? " go" : "");
@@ -264,7 +263,8 @@ function setConn(ok) {
   const d = $("#conn-dot"), t = $("#conn-text");
   if (!d) return;
   d.className = "dot " + (ok ? "green" : "red");
-  t.textContent = ok ? "connected" : "reconnecting…";
+  t.textContent = ok ? "" : "reconnecting…";
+  $("#conn").title = ok ? "connected — live updates" : "reconnecting…";
 }
 
 let es = null;
@@ -324,6 +324,7 @@ async function route() {
     every(ms, fn) { this.timers.push(setInterval(() => { if (this.alive) fn(); }, ms)); },
   };
   S.page = pg;
+  document.body.dataset.page = id;
   window.scrollTo(0, 0);
   try { await PAGES[id](pg); } catch (e) {
     if (pg.alive && e.message !== "login required") el.append(h("div", { class: "banner red", style: "margin:0" }, e.message));
@@ -333,9 +334,17 @@ async function route() {
 function pageHead(title, sub, ...actions) {
   return h("div", { class: "page-head" }, h("div", { class: "grow" }, h("h1", {}, title), sub ? h("p", {}, sub) : null), ...actions);
 }
-function card(title, ...kids) {
-  return h("div", { class: "card" }, title ? (typeof title === "string" ? h("h2", {}, title) : title) : null, ...kids);
+/** A page section: straight on the background, a hairline above. `title` is a string or a secHead(). */
+function sec(title, ...kids) {
+  return h("section", { class: "sec" }, title ? (typeof title === "string" ? h("h2", {}, title) : title) : null, ...kids);
 }
+function secHead(title, ...right) {
+  return h("div", { class: "sec-head" }, h("h2", {}, title), ...right);
+}
+const meta = (text) => h("span", { class: "meta num" }, text);
+/** Label (+ hint) on the left, controls on the right; rows inside fields() are striped. */
+const fieldRow = (k, sub, ...ctl) => h("div", { class: "field-row" }, h("div", { class: "k" }, k, sub ? h("small", {}, sub) : null), h("div", { class: "row wrap" }, ...ctl));
+const fields = (...rows) => h("div", { class: "fields" }, ...rows);
 
 // ───────────────────────────── now encoding ─────────────────────────────
 function frameImg(j) {
@@ -395,8 +404,7 @@ function nowView(box, emptyFn) {
           } }, "Cancel"),
         };
         b.el = h("div", { class: "now" }, b.frame,
-          h("div", { style: "min-width:0" }, h("div", { class: "row" }, b.title, b.origin), b.sub, b.steps, b.bar, b.metrics, b.sizes,
-            h("div", { class: "row", style: "margin-top:10px" }, b.cancel)));
+          h("div", { style: "min-width:0" }, h("div", { class: "row" }, b.title, b.origin, b.cancel), b.sub, b.steps, b.bar, b.metrics, b.sizes));
         blocks.set(j.id, b);
         box.append(b.el);
       }
@@ -424,21 +432,19 @@ function nowView(box, emptyFn) {
 PAGES.dashboard = async (pg) => {
   const info = S.info;
   pg.el.append(pageHead("Dashboard", null));
-  const tiles = h("div", { class: "tiles" });
+  const tiles = h("div", { class: "stats" });
   const nowBox = h("div");
-  const nextBox = h("div", { class: "list" });
+  const nextBox = h("div", { class: "list" }), nextMeta = meta("");
   const logBox = h("div", { class: "list log" });
   const chartBox = h("div");
-  pg.el.append(tiles, h("div", { class: "grid cols-main" },
-    h("div", { class: "stack" },
-      card(h("div", { class: "card-head" }, h("h2", {}, "Now"), h("a", { href: "#/queue", class: "btn ghost sm" }, "Queue →")), nowBox),
-      card(h("div", { class: "card-head" }, h("h2", {}, "Space saved per day"), h("span", { class: "muted", style: "font-size:12.5px" }, "last 30 days")), chartBox)),
-    h("div", { class: "stack" },
-      card(h("div", { class: "card-head" }, h("h2", {}, "Up next"), h("a", { href: "#/automation", class: "btn ghost sm" }, "Automation →")), nextBox),
-      card("Activity", logBox))));
+  pg.el.append(tiles,
+    sec(secHead("Now", h("a", { href: "#/queue", class: "btn ghost sm" }, "Queue →")), nowBox),
+    sec(secHead("Up next", nextMeta, h("a", { href: "#/automation", class: "btn ghost sm" }, "Automation →")), nextBox),
+    sec(secHead("Space saved per day", meta("last 30 days")), chartBox),
+    sec(secHead("Activity", h("a", { href: "#/automation", class: "btn ghost sm" }, "More →")), logBox));
 
   let hist = [];
-  const tile = (label, value, sub, cls = "", href) => h(href ? "a" : "div", { class: "tile", href },
+  const tile = (label, value, sub, cls = "", href) => h(href ? "a" : "div", { class: "stat-cell", href },
     h("div", { class: "label" }, label), h("div", { class: "value " + cls }, value), h("div", { class: "sub trunc" }, sub));
   const drawTiles = () => {
     const l = S.live || { saved: 0, inbox: 0, review: 0, automation: { mode: "off", status: "" } };
@@ -459,17 +465,16 @@ PAGES.dashboard = async (pg) => {
       h("a", { href: "#/library" }, "Pick a show in the Library"), " or ", h("a", { href: "#/automation" }, "let automation handle it"), "."));
   });
   const drawNext = (a) => {
+    nextMeta.textContent = a.queue_total ? num(a.queue_total) : "";
     if (!a.queue.length) {
       nextBox.replaceChildren(h("div", { class: "empty" }, a.settings.auto_mode === "off" ? "Automation is off." : "Nothing above your threshold right now."));
       return;
     }
-    nextBox.replaceChildren(...a.queue.slice(0, 6).map((p) => h("div", { class: "item" },
-      h("div", { class: "grow" }, h("div", { class: "trunc" }, base(p.path)), h("div", { class: "dim trunc", style: "font-size:12px" }, parentName(p.path) + " · " + p.preset)),
-      h("span", { class: "num green nowrap" }, "−" + pct(p.pct)))),
-      a.queue_total > 6 ? h("div", { class: "item dim", style: "font-size:12.5px" }, `+ ${num(a.queue_total - 6)} more`) : "");
+    nextBox.replaceChildren(...a.queue.slice(0, 5).map(nextItem),
+      a.queue_total > 5 ? h("div", { class: "more" }, `+ ${num(a.queue_total - 5)} more, biggest savings first`) : "");
   };
   const drawLog = (log) => {
-    logBox.replaceChildren(...(log.length ? log.slice(0, 12).map(logItem) : [h("div", { class: "empty" }, "No activity yet.")]));
+    logBox.replaceChildren(...(log.length ? log.slice(0, 10).map(logItem) : [h("div", { class: "empty" }, "No activity yet.")]));
   };
 
   const [a, hs] = await Promise.all([api("/api/automation"), api("/api/history")]);
@@ -498,25 +503,31 @@ function savingsChart(hist) {
   }
   const max = Math.max(...buckets.map((b) => b.v));
   if (max <= 0) return h("div", { class: "empty" }, "Nothing replaced in the last 30 days.");
-  const W = 600, H = 150, pad = 22, bw = (W - pad) / days;
+  const W = 600, H = 100, bw = W / days;
   const ns = "http://www.w3.org/2000/svg";
   const el = (t, a) => { const e = document.createElementNS(ns, t); for (const k in a) e.setAttribute(k, a[k]); return e; };
   const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, class: "chart", preserveAspectRatio: "none", role: "img", "aria-label": "Space saved per day" });
-  svg.append(el("line", { x1: pad, x2: W, y1: H - 16, y2: H - 16, class: "axis" }));
   const g = el("g", { class: "bar-g" });
   buckets.forEach((b, i) => {
     if (!b.v) return;
-    const bh = Math.max(2, (b.v / max) * (H - 30));
-    const r = el("rect", { x: pad + i * bw + 2, y: H - 16 - bh, width: Math.max(2, bw - 4), height: bh, rx: 2 });
+    const bh = Math.max(2, (b.v / max) * (H - 4));
+    const r = el("rect", { x: i * bw + 1.5, y: H - bh, width: Math.max(2, bw - 3), height: bh, rx: 1 });
     const t = el("title", {}); t.textContent = `${b.d.toLocaleDateString()}: ${fsize(b.v)} saved · ${b.n} files`;
     r.append(t); g.append(r);
   });
   svg.append(g);
-  const label = (x, txt, anchor) => { const t = el("text", { x, y: H - 3, "text-anchor": anchor }); t.textContent = txt; svg.append(t); };
   const fmt = (d) => d.toLocaleDateString([], { month: "short", day: "numeric" });
-  label(pad, fmt(buckets[0].d), "start"); label(W, "today", "end");
-  const top = el("text", { x: 0, y: 12 }); top.textContent = fsize(max); svg.append(top);
-  return svg;
+  return h("div", {}, svg, h("div", { class: "chart-x" }, h("span", {}, fmt(buckets[0].d)), h("span", {}, `best day ${fsize(max)}`), h("span", {}, "today")));
+}
+
+/** One line per file automation would encode next. */
+function nextItem(p, i) {
+  return h("div", { class: "item", title: p.path },
+    i != null ? h("span", { class: "num dim", style: "width:22px;flex:none" }, i + 1) : null,
+    h("span", { class: "trunc grow" }, base(p.path)),
+    h("span", { class: "dim trunc hide-sm", style: "flex:0 1 34%" }, parentName(p.path)),
+    h("span", { class: "num dim nowrap hide-sm" }, fsize(p.size)),
+    h("span", { class: "num green nowrap", style: "width:48px;text-align:right" }, "−" + pct(p.pct)));
 }
 
 function logItem(e) {
@@ -534,9 +545,10 @@ function logItem(e) {
     sweep: ["", "Library sweep", e.counts ? `${num(e.counts.auto)} to encode · ${num(e.counts.review)} borderline · ${num(e.counts.skip)} skipped` : ""],
   };
   const [color, what, detail] = map[e.action] || ["", e.action, ""];
-  return h("div", { class: "item" }, h("time", {}, clock(e.t)), h("i", { class: "dot " + color, style: "margin-top:6px" }),
-    h("div", { class: "grow", style: "min-width:0" }, h("div", { class: "trunc" }, h("b", { style: "font-weight:500" }, what), name ? " · " + name : ""),
-      detail ? h("div", { class: "dim trunc", style: "font-size:12px" }, detail) : null));
+  return h("div", { class: "item", title: [what, e.path, detail].filter(Boolean).join("\n") }, h("time", {}, clock(e.t)), h("i", { class: "dot " + color }),
+    h("span", { class: "nowrap", style: "font-weight:500" }, what),
+    h("span", { class: "trunc grow" }, name),
+    detail ? h("span", { class: "dim trunc hide-sm", style: "flex:0 1 42%;text-align:right" }, detail) : null);
 }
 
 // ───────────────────────────── library ─────────────────────────────
@@ -555,13 +567,13 @@ PAGES.library = async (pg) => {
   const scanBtn = h("button", { class: "btn", onclick: async () => {
     if (await act(() => post("/api/library/scan", { root, force: true }))) toast("Re-listing the library — only new or changed files get their headers read.", "", 5000);
   } }, "Rescan");
-  const scanLine = h("span", { class: "muted", style: "font-size:13px" });
-  const summary = h("div", { class: "muted", style: "margin:-6px 0 14px" });
+  const scanLine = h("span", { class: "muted small" });
+  const summary = h("div", { class: "summary" });
   const table = h("div");
   const dupBox = h("div");
   pg.el.append(pageHead("Library", "Shows ranked by how much space re-encoding would free."),
-    h("div", { class: "row wrap", style: "margin-bottom:14px" }, info.roots.length > 1 ? rootSel : null, rankSel, search, scanBtn, scanLine),
-    summary, card(null, table), dupBox);
+    h("div", { class: "toolbar" }, info.roots.length > 1 ? rootSel : null, rankSel, search, scanBtn, scanLine),
+    summary, table, dupBox);
 
   const drawScan = (l) => {
     const s = l && l.scan;
@@ -597,11 +609,11 @@ PAGES.library = async (pg) => {
       h("thead", {}, h("tr", {}, h("th", {}, "Show"), h("th", { class: "num" }, "Size"), h("th", { class: "hide-sm" }, "Codecs"),
         h("th", { class: "hide-sm" }, "Best preset"), h("th", { class: "num" }, "Could free"), h("th", { class: "num hide-sm" }, "Done"))),
       h("tbody", {}, rows))),
-    shows.length > limit ? h("div", { style: "text-align:center;margin-top:10px" }, h("button", { class: "btn", onclick: () => { limit += 500; draw(); } }, `Show more (${num(shows.length - limit)})`)) : "");
-    dupBox.replaceChildren(data.duplicates.length ? h("details", { class: "card", style: "margin-top:14px" },
+    shows.length > limit ? h("div", { style: "margin-top:10px" }, h("button", { class: "btn", onclick: () => { limit += 500; draw(); } }, `Show more (${num(shows.length - limit)})`)) : "");
+    dupBox.replaceChildren(data.duplicates.length ? h("section", { class: "sec", style: "margin-top:16px" }, h("details", {},
       h("summary", {}, `${data.duplicates.length} shows are split across several folders`),
       h("div", { class: "list", style: "margin-top:10px" }, data.duplicates.map((d) => h("div", { class: "item" },
-        h("b", { style: "font-weight:500;min-width:180px" }, d.title), h("span", { class: "muted trunc" }, d.folders.join("  ·  ")))))) : "");
+        h("span", { style: "font-weight:500;flex:0 0 220px", class: "trunc" }, d.title), h("span", { class: "muted trunc grow" }, d.folders.join("  ·  "))))))) : "");
   }
 
   async function load() {
@@ -632,10 +644,11 @@ PAGES.browse = async (pg) => {
   if (!pg.alive) return;
   const crumbs = h("div", { class: "crumbs" }, h("a", { href: "#/library" }, "Library"),
     d.crumbs.map((c) => [h("span", {}, "/"), h("a", { href: "#/browse?path=" + enc(c.path) }, c.name)]));
-  const list = h("div", { class: "list", style: "gap:1px" });
-  const details = h("div", { class: "card details" });
-  pg.el.append(crumbs, h("div", { class: "browse" }, card(null, list), details));
-  let selected = null;
+  const list = h("div", { class: "list entries" });
+  const details = h("div", { class: "detail", style: "padding-bottom:20px" }), gainsBox = h("div");
+  const what = [d.dirs.length ? plural(d.dirs.length, "folder") : "", d.files.length ? plural(d.files.length, "file") : ""].filter(Boolean).join(" · ");
+  pg.el.append(crumbs, details, sec(secHead("In this folder", meta(what)), list), gainsBox);
+  let open = null;
   for (const x of d.dirs) {
     list.append(h("div", { class: "entry", onclick: () => { location.hash = "#/browse?path=" + enc(x.path); } }, icon("folder"),
       h("span", { class: "trunc" }, x.name),
@@ -644,19 +657,24 @@ PAGES.browse = async (pg) => {
   for (const f of d.files) {
     const st = f.status === "done" ? h("span", { class: "badge green" }, "✓ recast") : f.status === "busy" ? h("span", { class: "badge blue" }, "in queue")
       : f.status === "review" ? h("span", { class: "badge amber" }, "borderline") : "";
-    const row = h("div", { class: "entry", onclick: () => {
-      if (selected) selected.classList.remove("on");
-      selected = row; row.classList.add("on");
-      showDetails(details, f.path, pg);
+    const row = h("div", { class: "entry", title: "Click for details", onclick: () => {
+      const same = open && open.row === row;
+      if (open) { open.row.classList.remove("on"); open.box.remove(); open = null; }
+      if (same) return;
+      const box = h("article", { class: "entry-detail" });  // not a div: keeps the zebra striping of the rows intact
+      row.after(box); row.classList.add("on");
+      open = { row, box };
+      showDetails(box, f.path, pg);
     } }, icon("file"), h("span", { class: "trunc" }, f.name),
-    h("span", { class: "meta" }, st, f.codec ? h("span", { class: "codec" }, f.codec) : "", f.res || "", fsize(f.size)));
+    h("span", { class: "meta" }, st, f.codec ? h("span", { class: "codec hide-sm" }, f.codec) : "", h("span", { class: "hide-sm" }, f.res || ""), fsize(f.size)));
     list.append(row);
   }
   if (!d.dirs.length && !d.files.length) list.append(h("div", { class: "empty" }, "No folders or video files here."));
-  showDetails(details, path, pg);
+  showDetails(details, path, pg, gainsBox);
 };
 
-async function showDetails(box, path, pg) {
+/** Fill `box` with a folder's or file's details. A folder's per-preset table goes in `gainsBox` (below its contents). */
+async function showDetails(box, path, pg, gainsBox) {
   box.dataset.path = path;
   box.replaceChildren(h("div", { class: "empty" }, "Loading…"));
   let d;
@@ -665,18 +683,24 @@ async function showDetails(box, path, pg) {
     return;
   }
   if (!pg.alive || box.dataset.path !== path) return;
-  const kids = d.kind === "folder" ? folderDetails(d) : fileDetails(d, box, pg);
-  box.replaceChildren(...kids);
-  if (d.partial) setTimeout(() => { if (pg.alive && box.dataset.path === path) showDetails(box, path, pg); }, 3000);
+  if (d.kind === "folder") {
+    box.replaceChildren(...folderDetails(d));
+    gainsBox.replaceChildren(sec("What each preset would do", gainsTable(d, true, d.files)));
+  } else box.replaceChildren(...fileDetails(d, box, pg));
+  if (d.partial) setTimeout(() => { if (pg.alive && box.dataset.path === path) showDetails(box, path, pg, gainsBox); }, 3000);
 }
 
 function gainsTable(d, isFolder, files) {
   if (!d.gains.length) return h("div", { class: "empty" }, "No video files.");
+  if (d.gains.every((g) => g.pct == null)) {
+    const why = [...new Set(d.gains.map((g) => g.why).filter(Boolean))];
+    return h("div", { class: "empty" }, `Nothing to encode here with any preset${why.length ? ` — ${why.join(", ")}` : ""}.`);
+  }
   return h("div", { class: "table-wrap" }, h("table", { class: "table" },
     h("thead", {}, h("tr", {}, h("th", {}, "Preset"), isFolder ? h("th", { class: "num" }, "Files") : null, h("th", { class: "num" }, "Now → after"), h("th", { class: "num" }, "Saves"), h("th", {}))),
     h("tbody", {}, d.gains.map((g) => h("tr", {},
-      h("td", {}, h("div", { class: "trunc", style: "max-width:240px" }, g.preset, g.default ? h("span", { class: "badge", style: "margin-left:6px" }, "default") : ""),
-        h("div", { class: "sub" }, g.pct == null ? g.why : `${g.encoder}${g.how === "measured" ? " · measured on this show" : ""}`)),
+      h("td", { class: "name" }, h("div", { class: "row", style: "gap:8px" }, h("span", { class: "trunc", style: "flex:0 1 auto" }, g.preset), g.default ? h("span", { class: "badge" }, "default") : "",
+        h("span", { class: "sub trunc grow hide-sm" }, g.pct == null ? g.why : `${g.encoder}${g.how === "measured" ? " · measured on this show" : ""}`))),
       isFolder ? h("td", { class: "num" }, g.files || "—") : null,
       h("td", { class: "num nowrap" }, g.pct == null ? "—" : `${fsize(g.src)} → ${fsize(g.out)}`),
       h("td", { class: "num" }, g.pct == null ? "" : h("span", { class: g.pct > 0.05 ? "green" : g.pct < 0 ? "red" : "muted" }, (g.pct > 0 ? "−" : "+") + pct(Math.abs(g.pct)))),
@@ -686,66 +710,65 @@ function gainsTable(d, isFolder, files) {
 function folderDetails(d) {
   const cb = codecBar(d.codecs, d.size);
   const r = d.recast;
+  const sub = [d.partial ? h("span", { class: "blue" }, `reading headers ${num(d.read)}/${num(d.files)}…`) : "",
+    d.arr ? `${d.arr.source}: ${d.arr.title}${d.arr.series_type === "anime" ? " (anime)" : ""}` : ""].filter(Boolean);
   return [
-    h("div", { class: "card-head" }, h("h2", { class: "trunc" }, d.name), h("button", { class: "btn primary sm", onclick: () => encodeModal(d.path, true, d.last_used ? d.last_used.preset : null, d.files) }, "Encode…")),
-    h("div", { class: "muted", style: "margin-top:4px" }, `${num(d.files)} files · ${fsize(d.size)}`, d.partial ? h("span", { class: "blue" }, ` · reading headers ${num(d.read)}/${num(d.files)}…`) : "",
-      d.arr ? ` · ${d.arr.source}: ${d.arr.title}${d.arr.series_type === "anime" ? " (anime)" : ""}` : ""),
-    h("div", { style: "margin-top:10px" }, cb.bar, cb.legend),
-    r.files ? h("div", { class: "estimate", style: "margin-top:12px" }, h("span", { class: "green" }, `✓ recast re-encoded ${r.files} files here`), ` · ${fsize(r.before)} → ${fsize(r.after)} (−${pct(saving(r.before, r.after))})`) : "",
-    d.last_used ? h("div", { class: "dim", style: "margin-top:8px;font-size:12.5px" }, `Last used here: ${d.last_used.preset}`) : "",
+    h("div", { class: "sec-head", style: "margin:0" }, h("h1", { class: "trunc grow" }, d.name), meta(`${plural(d.files, "file")} · ${fsize(d.size)}`),
+      h("button", { class: "btn primary sm", onclick: () => encodeModal(d.path, true, d.last_used ? d.last_used.preset : null, d.files) }, "Encode…")),
+    sub.length ? h("div", { class: "muted small", style: "margin-top:-8px" }, ...sub.flatMap((x, i) => (i ? [" · ", x] : [x]))) : "",
+    h("div", {}, cb.bar, cb.legend),
+    r.files || d.last_used ? h("div", { class: "estimate small" },
+      r.files ? h("div", {}, h("span", { class: "green" }, `✓ recast re-encoded ${plural(r.files, "file")} here`), ` · ${fsize(r.before)} → ${fsize(r.after)} (−${pct(saving(r.before, r.after))})`) : "",
+      d.last_used ? h("div", { class: "dim" }, `Last used here: ${d.last_used.preset}`) : "") : "",
     excludeRow(d),
-    h("h3", { style: "margin:16px 0 4px" }, "What each preset would do"),
-    gainsTable(d, true, d.files),
   ];
 }
 
 function excludeRow(d) {
-  if (d.excluded && !d.excluded_here) return h("div", { class: "dim", style: "margin-top:10px;font-size:12.5px" }, "Automation leaves this alone (a parent folder is excluded).");
-  const box = h("label", { class: "check", style: "margin-top:12px" });
+  if (d.excluded && !d.excluded_here) return h("div", { class: "dim small" }, "Automation leaves this alone (a parent folder is excluded).");
+  const box = h("label", { class: "check small" });
   const cb = h("input", { type: "checkbox", checked: !!d.excluded_here, onchange: async (e) => {
     const on = e.target.checked;
     const r = await act(() => post("/api/automation/exclude", { path: d.path, on }), on ? "Automation will leave it alone" : "Back in automation");
     if (!r) e.target.checked = !on;
   } });
-  box.append(cb, "Leave this out of automation", h("span", { class: "dim", style: "font-size:12px;margin-left:6px" }, "manual encodes still work"));
-  return box;
+  box.append(cb, "Leave this out of automation", h("span", { class: "dim" }, "· manual encodes still work"));
+  return h("div", {}, box);
 }
 
 function fileDetails(d, box, pg) {
   const m = d.media;
   const vid = [m.codec, m.width && `${m.width}×${m.height}`, m.fps && `${Number(m.fps).toFixed(3).replace(/\.?0+$/, "")} fps`, m.pix_fmt, m.hdr, m.interlaced && "interlaced"].filter(Boolean).join(" · ");
   const out = [
-    h("h2", { class: "trunc", title: d.path }, d.name),
-    d.episode ? h("div", { class: "muted", style: "margin-top:2px" }, `S${String(d.episode.season).padStart(2, "0")}E${String(d.episode.episode).padStart(2, "0")} · ${d.episode.title}${d.episode.quality ? " · " + d.episode.quality : ""}`) : "",
-    h("div", { class: "kv", style: "margin-top:12px" },
+    d.episode ? h("div", { class: "muted" }, `S${String(d.episode.season).padStart(2, "0")}E${String(d.episode.episode).padStart(2, "0")} · ${d.episode.title}${d.episode.quality ? " · " + d.episode.quality : ""}`) : "",
+    h("div", { class: "kv wide" },
       h("span", {}, "Video"), h("span", {}, vid),
       h("span", {}, "Bitrate"), h("span", { class: "num" }, m.vkbps ? `${num(m.vkbps)} kb/s` : "—"),
       h("span", {}, "Length"), h("span", {}, fdur(m.duration)),
       h("span", {}, "Size"), h("span", { class: "num" }, fsize(m.size)),
       h("span", {}, "Audio"), h("span", {}, m.audio.join(", ") || "none"),
-      h("span", {}, "Subtitles"), h("span", { class: "trunc" }, m.subs.join(", ") || "none")),
-    d.excluded ? h("div", { class: "dim", style: "margin-top:10px;font-size:12.5px" }, "Automation leaves this folder alone.") : "",
+      h("span", {}, "Subtitles"), h("span", { class: "trunc", title: m.subs.join(", ") }, m.subs.join(", ") || "none")),
+    d.excluded ? h("div", { class: "dim small" }, "Automation leaves this folder alone.") : "",
   ];
   if (d.history) {
     const hh = d.history;
-    out.push(h("div", { class: "estimate", style: "margin-top:14px" },
-      h("div", {}, h("span", { class: "green" }, "✓ Re-encoded by recast"), ` with ${hh.preset}, ${ago(hh.when)}`),
-      h("div", { class: "num muted", style: "margin-top:2px" }, `${fsize(hh.src_size)} → ${fsize(hh.out_size)} (−${pct(saving(hh.src_size, hh.out_size))})`),
-      h("div", { class: "dim", style: "font-size:12px;margin-top:4px" }, originalWhere(hh)),
+    out.push(h("div", { class: "estimate" },
+      h("div", {}, h("span", { class: "green" }, "✓ Re-encoded by recast"), ` with ${hh.preset}, ${ago(hh.when)} · `,
+        h("span", { class: "num" }, `${fsize(hh.src_size)} → ${fsize(hh.out_size)} (−${pct(saving(hh.src_size, hh.out_size))})`)),
+      h("div", { class: "dim small", style: "margin-top:2px" }, originalWhere(hh)),
       hh.can_restore ? h("button", { class: "btn sm", style: "margin-top:8px", onclick: async () => {
         if (!(await confirmBox("Put the original back?", "The original returns to its place and the re-encode moves to recast's trash. Nothing is copied — it's a rename on the share, so it's instant.", "Restore original"))) return;
         const r = await act(() => post("/api/history/restore", { path: d.path }));
-        if (r) { toast(r.message, "green"); history.back(); }
+        if (r) { toast(r.message, "green"); route(); }
       } }, "Restore original") : ""));
   }
   if (d.review) {
-    out.push(h("div", { class: "estimate", style: "margin-top:14px" },
-      h("div", {}, h("span", { class: "amber" }, "Automation wants your call: "), `about −${pct(d.review.pct)} with ${d.review.preset}`),
-      h("div", { class: "row", style: "margin-top:8px" },
-        h("button", { class: "btn sm go", onclick: async () => { if (await act(() => post("/api/automation/review/encode", { path: d.path }), "Queued")) showDetails(box, d.path, pg); } }, "Encode it"),
-        h("button", { class: "btn sm", onclick: async () => { if (await act(() => post("/api/automation/review/skip", { path: d.path }))) showDetails(box, d.path, pg); } }, "Skip"))));
+    out.push(h("div", { class: "estimate row wrap" },
+      h("span", { class: "grow" }, h("span", { class: "amber" }, "Automation wants your call: "), `about −${pct(d.review.pct)} with ${d.review.preset}`),
+      h("button", { class: "btn sm go", onclick: async () => { if (await act(() => post("/api/automation/review/encode", { path: d.path }), "Queued")) showDetails(box, d.path, pg); } }, "Encode it"),
+      h("button", { class: "btn sm", onclick: async () => { if (await act(() => post("/api/automation/review/skip", { path: d.path }))) showDetails(box, d.path, pg); } }, "Skip")));
   }
-  if (d.gains.length) out.push(h("h3", { style: "margin:16px 0 4px" }, "What each preset would do"), gainsTable(d, false, 1));
+  if (d.gains.length) out.push(h("div", {}, h("h3", { style: "margin-bottom:6px" }, "What each preset would do"), gainsTable(d, false, 1)));
   return out;
 }
 
@@ -840,7 +863,7 @@ async function encodeModal(path, isFolder, presetName, files) {
 PAGES.queue = async (pg) => {
   const holdBtn = h("button", { class: "btn", onclick: toggleHold });
   const clearBtn = h("button", { class: "btn", onclick: async () => { const r = await act(() => post("/api/queue/clear")); if (r) { toast(`Cleared ${r.cleared}`, "", 2500); load(); } } }, "Clear finished");
-  const box = h("div", { class: "stack" });
+  const box = h("div");
   pg.el.append(pageHead("Queue", "One encode at a time; the next file is copied while the current one runs.", holdBtn, clearBtn), box);
   let sig = "";
   const row = (j) => {
@@ -859,8 +882,8 @@ PAGES.queue = async (pg) => {
         ["failed", "cancelled"].includes(j.stage) ? h("button", { class: "btn sm", onclick: async () => { if (await act(() => post(`/api/jobs/${j.id}/retry`))) load(); } }, "Retry") : "",
         h("button", { class: "btn sm ghost", onclick: () => jobModal(j.id) }, "Details")));
   };
-  const section = (title, jobs, empty) => card(h("div", { class: "card-head" }, h("h2", {}, title), h("span", { class: "muted num" }, jobs.length || "")),
-    jobs.length ? h("div", { class: "table-wrap" }, h("table", { class: "table" }, h("tbody", {}, jobs.map(row)))) : h("div", { class: "empty", style: "padding:10px" }, empty));
+  const table = (jobs) => h("div", { class: "table-wrap" }, h("table", { class: "table" }, h("tbody", {}, jobs.map(row))));
+  const section = (title, jobs, empty) => sec(secHead(title, meta(jobs.length || "")), jobs.length ? table(jobs) : h("div", { class: "empty" }, empty));
   async function load() {
     const d = await api("/api/jobs").catch(() => null);
     if (!d || !pg.alive) return;
@@ -888,8 +911,7 @@ PAGES.queue = async (pg) => {
     box.replaceChildren(
       section("Running", running, live.hold ? "Paused." : "Nothing running."),
       section("Waiting", waiting, "Nothing waiting."),
-      needs.length ? card(h("div", { class: "card-head" }, h("h2", {}, "Waiting for your OK"), h("a", { class: "btn sm", href: "#/review" }, "Review →")),
-        h("div", { class: "table-wrap" }, h("table", { class: "table" }, h("tbody", {}, needs.map(row))))) : "",
+      needs.length ? sec(secHead("Waiting for your OK", meta(needs.length), h("a", { class: "btn sm", href: "#/review" }, "Review →")), table(needs)) : "",
       section("Finished", done, "Nothing finished yet."));
   }
   await load();
@@ -941,52 +963,85 @@ function compareView(j) {
     h("button", { class: side === v ? "on" : "", onclick: () => { side = v; drawSeg(); load(); } }, l)));
   drawSeg(); load();
   const slider = h("input", { type: "range", min: 2, max: 97, value: 35, onchange: (e) => { pos = e.target.value / 100; load(); }, "aria-label": "Position in the video" });
-  return h("div", { style: "max-width:760px" }, wrap, h("div", { class: "row", style: "margin-top:8px" }, seg, h("span", { class: "dim", style: "font-size:12px" }, "position"), slider));
+  return h("div", { class: "compare-box" }, wrap, h("div", { class: "row", style: "margin-top:8px" }, seg, h("span", { class: "dim small" }, "position"), slider));
 }
 
 // ───────────────────────────── review ─────────────────────────────
 PAGES.review = async (pg) => {
-  const inboxBox = h("div", { class: "stack" });
+  const inboxBox = h("div"), inboxMeta = meta("");
   const borderBox = h("div");
   pg.el.append(pageHead("Review", "Encodes waiting for your OK, and files automation wasn't sure about."),
-    h("div", { class: "stack" }, card(h("div", { class: "card-head" }, h("h2", {}, "Ready to replace")), inboxBox),
-      card(h("div", { class: "card-head" }, h("h2", {}, "Borderline files"), h("a", { href: "#/automation", class: "btn ghost sm" }, "Thresholds →")), borderBox)));
+    sec(secHead("Ready to replace", inboxMeta), inboxBox),
+    sec(secHead("Borderline files", h("a", { href: "#/automation", class: "btn ghost sm" }, "Thresholds →")), borderBox));
   let counts = "";
 
-  const jobItem = (j) => h("div", { class: "card", style: "background:var(--panel)" },
-    h("div", { class: "row wrap" }, h("b", { class: "trunc grow" }, j.name), originBadge(j.origin), h("span", { class: "badge" }, j.preset)),
-    h("div", { class: "num", style: "margin:6px 0 10px" }, `${fsize(j.src_size)} → `, h("b", {}, fsize(j.out_size)), " ",
-      h("span", { class: j.out_size < j.src_size ? "green" : "red" }, `(${j.out_size < j.src_size ? "−" : "+"}${pct(Math.abs(saving(j.src_size, j.out_size)))})`),
-      h("span", { class: "muted" }, `  ·  ${j.codec_from} ${num(j.src_info.vkbps)} kb/s → ${j.codec_to} ${num((j.out_info || {}).vkbps || Math.round(j.kbps))} kb/s`)),
-    j.flag ? h("div", { class: "amber", style: "margin-bottom:8px" }, "⚠ " + j.flag) : "",
-    j.note ? h("div", { class: "amber", style: "margin-bottom:8px" }, j.note) : "",
-    compareView(j),
-    h("div", { class: "row", style: "margin-top:12px" },
-      h("button", { class: "btn go", onclick: async () => { if (await act(() => post(`/api/inbox/job/${j.id}/approve`))) { toast("Replacing — the original goes to recast's trash.", "green"); load(); } } }, j.flag ? "Replace anyway" : "Replace original"),
-      h("button", { class: "btn danger", onclick: async () => { if (await act(() => post(`/api/inbox/job/${j.id}/deny`))) load(); } }, "Discard encode"),
-      h("span", { class: "dim", style: "font-size:12.5px" }, `waiting ${ago(j.waiting_since)}`)));
+  // One striped row per encode (or batch) with the decision buttons; clicking the row opens the frame
+  // comparison under it. The first one starts open.
+  const stop = (fn) => async (e) => { e.stopPropagation(); await fn(); };
+  const shrink = (src, out) => h("span", { class: out < src ? "green" : "red" }, `${out < src ? "−" : "+"}${pct(Math.abs(saving(src, out)))}`);
+  let openId = null;
+  const expandable = (key, row, detail) => {
+    const toggle = () => {
+      const was = row.classList.contains("on");
+      $$(".entries > .entry.on", inboxBox).forEach((r) => { r.classList.remove("on"); r.nextElementSibling?.matches("article") && r.nextElementSibling.remove(); });
+      openId = null;
+      if (was) return;
+      row.classList.add("on"); row.after(h("article", { class: "entry-detail" }, detail()));
+      openId = key;
+    };
+    row.addEventListener("click", toggle);
+    return toggle;
+  };
 
-  const batchItem = (b) => h("div", { class: "card", style: "background:var(--panel)" },
-    h("div", { class: "row wrap" }, h("b", { class: "trunc grow" }, b.name), h("span", { class: "badge" }, b.preset)),
-    h("div", { class: "num", style: "margin:6px 0" }, `${b.done} of ${b.files} encoded`, b.active ? ` · ${b.active} still running` : "", " · ",
-      `${fsize(b.src)} → `, h("b", {}, fsize(b.out)), " ", h("span", { class: "green" }, `(−${pct(saving(b.src, b.out))})`)),
-    b.flagged ? h("div", { class: "amber" }, `⚠ ${b.flagged} file${b.flagged > 1 ? "s" : ""} flagged — they'll still wait for you individually.`) : "",
-    h("details", { style: "margin-top:8px" }, h("summary", {}, "Files"),
-      h("div", { class: "list", style: "margin-top:6px" }, b.items.map((j) => h("div", { class: "item" },
+  const jobItem = (j) => {
+    const row = h("div", { class: "entry", title: "Click to compare frames" },
+      h("span", { class: "trunc grow", style: "font-weight:500" }, j.name), originBadge(j.origin),
+      j.flag ? h("span", { class: "badge amber" }, "flagged") : "",
+      h("span", { class: "num muted nowrap hide-sm" }, `${fsize(j.src_size)} → ${fsize(j.out_size)}`),
+      h("span", { class: "num nowrap", style: "width:48px;text-align:right" }, shrink(j.src_size, j.out_size)),
+      h("button", { class: "btn sm go", onclick: stop(async () => { if (await act(() => post(`/api/inbox/job/${j.id}/approve`))) { toast("Replacing — the original goes to recast's trash.", "green"); load(); } }) }, j.flag ? "Replace anyway" : "Replace"),
+      h("button", { class: "btn sm danger", onclick: stop(async () => { if (await act(() => post(`/api/inbox/job/${j.id}/deny`))) load(); }) }, "Discard"));
+    const detail = () => h("div", { class: "rv" }, compareView(j),
+      h("div", { class: "rv-info small" },
+        h("div", {}, h("span", { class: "dim" }, "Preset "), j.preset),
+        h("div", { class: "num" }, `${j.codec_from} ${num(j.src_info.vkbps)} kb/s → ${j.codec_to} ${num((j.out_info || {}).vkbps || Math.round(j.kbps))} kb/s`),
+        h("div", { class: "num" }, `${fsize(j.src_size)} → `, h("b", {}, fsize(j.out_size)), " (", shrink(j.src_size, j.out_size), ")"),
+        j.flag ? h("div", { class: "amber" }, "⚠ " + j.flag) : "",
+        j.note ? h("div", { class: "amber" }, j.note) : "",
+        h("div", { class: "dim" }, `waiting ${ago(j.waiting_since)}`),
+        h("div", {}, h("button", { class: "btn sm ghost", style: "margin-left:-9px", onclick: () => jobModal(j.id) }, "Streams & ffmpeg log"))));
+    return [row, expandable("j" + j.id, row, detail)];
+  };
+
+  const batchItem = (b) => {
+    const row = h("div", { class: "entry", title: "Click for the files" },
+      h("span", { class: "trunc grow", style: "font-weight:500" }, b.name), h("span", { class: "badge" }, `${b.done}/${b.files} files`),
+      b.flagged ? h("span", { class: "badge amber" }, `${b.flagged} flagged`) : "",
+      h("span", { class: "num muted nowrap hide-sm" }, `${fsize(b.src)} → ${fsize(b.out)}`),
+      h("span", { class: "num nowrap", style: "width:48px;text-align:right" }, shrink(b.src, b.out)),
+      h("button", { class: "btn sm go", onclick: stop(async () => { if (await act(() => post(`/api/inbox/batch/${b.id}/approve`))) { toast("Approved — files are replaced as they finish.", "green"); load(); } }) }, b.active ? "Approve all" : "Replace all"),
+      h("button", { class: "btn sm danger", onclick: stop(async () => { if (await confirmBox("Discard the whole batch?", "Encoded files are deleted from scratch; the library stays as it is.", "Discard", "danger") && await act(() => post(`/api/inbox/batch/${b.id}/deny`))) load(); }) }, "Discard all"));
+    const detail = () => h("div", { class: "detail small" },
+      h("div", { class: "muted" }, `${b.preset} · ${b.done} of ${b.files} encoded`, b.active ? ` · ${b.active} still running — approving now covers them too` : ""),
+      b.flagged ? h("div", { class: "amber" }, `⚠ ${b.flagged} file${b.flagged > 1 ? "s" : ""} flagged — they'll still wait for you individually.`) : "",
+      h("div", { class: "list" }, b.items.map((j) => h("div", { class: "item" },
         h("span", { class: "trunc grow" }, j.name), j.flag ? h("span", { class: "badge amber" }, "flagged") : "",
         h("span", { class: "num muted nowrap" }, `${fsize(j.src_size)} → ${fsize(j.out_size)}`),
-        h("button", { class: "btn sm ghost", onclick: () => jobModal(j.id) }, "Compare"))))),
-    h("div", { class: "row", style: "margin-top:12px" },
-      h("button", { class: "btn go", onclick: async () => { if (await act(() => post(`/api/inbox/batch/${b.id}/approve`))) { toast("Approved — files are replaced as they finish.", "green"); load(); } } }, b.active ? "Approve all (incl. the rest)" : "Replace all"),
-      h("button", { class: "btn danger", onclick: async () => { if (await confirmBox("Discard the whole batch?", "Encoded files are deleted from scratch; the library stays as it is.", "Discard", "danger") && await act(() => post(`/api/inbox/batch/${b.id}/deny`))) load(); } }, "Discard all")));
+        h("button", { class: "btn sm ghost", onclick: () => jobModal(j.id) }, "Compare")))));
+    return [row, expandable("b" + b.id, row, detail)];
+  };
 
   let reason = null;  // null = every borderline file; otherwise one group
   const reasonLabel = (r, s) => r || `saving between ${pct(s.review_threshold)} and ${pct(s.auto_threshold)}`;
   async function load() {
     const [ib, a] = await Promise.all([api("/api/inbox"), api("/api/automation" + (reason == null ? "" : "?reason=" + enc(reason)))]);
     if (!pg.alive) return;
-    inboxBox.replaceChildren(...(ib.items.length ? ib.items.map((it) => (it.kind === "batch" ? batchItem(it) : jobItem(it)))
-      : [h("div", { class: "empty" }, "Nothing waiting for approval.")]));
+    inboxMeta.textContent = ib.items.length || "";
+    const keep = openId;
+    const rows = ib.items.map((it) => [it.kind === "batch" ? "b" : "j", it, ...(it.kind === "batch" ? batchItem(it) : jobItem(it))]);
+    inboxBox.replaceChildren(rows.length ? h("div", { class: "list entries" }, rows.map((r) => r[2])) : h("div", { class: "empty" }, "Nothing waiting for approval."));
+    const reopen = rows.find((r) => r[0] + r[1].id === keep) || rows[0];
+    if (reopen) reopen[3]();
     const s = a.settings;
     const groups = Object.entries(a.review_reasons || {}).sort((x, y) => y[1] - x[1]);
     const all = groups.reduce((n, g) => n + g[1], 0);
@@ -996,7 +1051,7 @@ PAGES.review = async (pg) => {
     } else {
       const shown = a.review_total;
       borderBox.replaceChildren(
-        h("p", { class: "muted", style: "margin:6px 0 10px" }, "Automation won't touch these on its own. Encode the ones you want; skipped files stay skipped until they change."),
+        h("p", { class: "lead" }, "Automation won't touch these on its own. Encode the ones you want; skipped files stay skipped until they change."),
         h("div", { class: "row wrap", style: "margin-bottom:12px" },
           h("div", { class: "chips grow" },
             h("button", { class: "chip" + (reason == null ? " on" : ""), onclick: () => { reason = null; load(); } }, `All ${num(all)}`),
@@ -1018,7 +1073,7 @@ PAGES.review = async (pg) => {
             h("td", { class: "right nowrap" },
               h("button", { class: "btn sm", onclick: async () => { if (await act(() => post("/api/automation/review/encode", { path: p.path }), "Queued")) load(); } }, "Encode"),
               h("button", { class: "btn sm ghost", onclick: async () => { if (await act(() => post("/api/automation/review/skip", { path: p.path }))) load(); } }, "Skip"))))))),
-        shown > a.review.length ? h("div", { class: "dim", style: "text-align:center;margin-top:10px;font-size:12.5px" }, `Showing the ${a.review.length} biggest of ${num(shown)}.`) : "");
+        shown > a.review.length ? h("div", { class: "dim small", style: "margin-top:8px" }, `Showing the ${a.review.length} biggest of ${num(shown)}.`) : "");
     }
     counts = `${(S.live || {}).inbox}|${(S.live || {}).review}`;
   }
@@ -1083,12 +1138,13 @@ PAGES.automation = async (pg) => {
     if (!p || my !== pseq || !pg.alive) return;
     const total = p.auto + p.review + p.skip || 1;
     outcome.replaceChildren(
-      h("div", { class: "stackbar", style: "margin:14px 0 8px;height:10px" },
+      h("div", { class: "stackbar" },
         h("i", { style: `width:${(p.auto / total) * 100}%;background:var(--green)` }), h("i", { style: `width:${(p.review / total) * 100}%;background:var(--amber)` }),
         h("i", { style: `width:${(p.skip / total) * 100}%;background:var(--shade-4)` })),
-      h("div", { class: "outcome" }, h("i", { style: "background:var(--green)" }), h("span", {}, h("b", {}, num(p.auto)), s.auto_mode === "ask" ? " files encode, then wait for your OK" : " files encode and replace on their own"), h("span", { class: "num green" }, "frees ~" + fsize(p.auto_bytes))),
-      h("div", { class: "outcome" }, h("i", { style: "background:var(--amber)" }), h("span", {}, h("b", {}, num(p.review)), " wait for you in Review"), h("span", { class: "num amber" }, "~" + fsize(p.review_bytes))),
-      h("div", { class: "outcome" }, h("i", { style: "background:var(--shade-4)" }), h("span", {}, h("b", {}, num(p.skip)), " skipped — already efficient or not worth it"), h("span", {})));
+      h("div", { class: "outcomes" },
+        h("span", {}, h("i", { style: "background:var(--green)" }), h("b", {}, num(p.auto)), s.auto_mode === "ask" ? "encode, then wait for your OK" : "encode and replace on their own", h("span", { class: "num green" }, "~" + fsize(p.auto_bytes))),
+        h("span", {}, h("i", { style: "background:var(--amber)" }), h("b", {}, num(p.review)), "wait for you in Review", h("span", { class: "num amber" }, "~" + fsize(p.review_bytes))),
+        h("span", {}, h("i", { style: "background:var(--shade-4)" }), h("b", {}, num(p.skip)), "skipped — already efficient or not worth it")));
   }, 200);
   for (const r of [autoR, revR]) {
     r.addEventListener("input", () => { syncSliders(r); refreshPreview(); });
@@ -1105,74 +1161,70 @@ PAGES.automation = async (pg) => {
   [hoursOn, from, to].forEach((x) => x.addEventListener("change", saveHours));
   const sweepN = h("input", { type: "number", min: 1, value: s.sweep_hours, onchange: (e) => save({ sweep_hours: Number(e.target.value) || 24 }) });
   const holdN = h("input", { type: "number", min: 1, value: s.auto_hold_max, onchange: (e) => save({ auto_hold_max: Number(e.target.value) || 10 }) });
-  const exclBox = h("div", { class: "list", style: "margin-top:8px" });
-  const drawExcl = (list) => exclBox.replaceChildren(...(list.length ? list.map((x) => h("div", { class: "item" },
-    h("div", { class: "grow" }, h("div", { class: "trunc", title: x }, base(x)), h("div", { class: "dim trunc", style: "font-size:12px" }, x)),
-    h("button", { class: "btn sm ghost", onclick: async () => {
-      const r = await act(() => post("/api/automation/exclude", { path: x, on: false }), `${base(x)} is back in automation`);
-      if (r) { d.excluded = r.excluded; drawExcl(r.excluded); refreshPreview(); }
-    } }, "Include again"))) : [h("div", { class: "empty" }, "Nothing excluded.")]));
-  drawExcl(d.excluded);
+  const exclBox = h("div", { class: "list" }), exclMeta = meta("");
+  const drawExcl = (list) => {
+    exclMeta.textContent = list.length || "";
+    exclBox.replaceChildren(...(list.length ? list.map((x) => h("div", { class: "item" },
+      h("span", { class: "trunc", style: "flex:0 1 auto;font-weight:500" }, base(x)), h("span", { class: "dim trunc grow small", title: x }, x),
+      h("button", { class: "btn sm ghost", onclick: async () => {
+        const r = await act(() => post("/api/automation/exclude", { path: x, on: false }), `${base(x)} is back in automation`);
+        if (r) { d.excluded = r.excluded; drawExcl(r.excluded); refreshPreview(); }
+      } }, "Include again"))) : [h("div", { class: "empty" }, "Nothing excluded.")]));
+  };
   const sweepBtn = h("button", { class: "btn sm", onclick: async () => { if (await act(() => post("/api/automation/sweep"))) toast("Sweeping — re-listing folders; only new or changed files are read.", "", 5000); } }, "Sweep now");
 
   // hooks
-  const copyRow = (label, url) => h("div", { class: "field", style: "margin-top:10px" }, h("span", { class: "muted", style: "font-size:12.5px;font-weight:500" }, label),
-    h("div", { class: "copy" }, h("code", { title: url }, url), h("button", { class: "btn sm", onclick: async (e) => {
-      try { await navigator.clipboard.writeText(url); e.target.textContent = "Copied"; setTimeout(() => { e.target.textContent = "Copy"; }, 1500); }
-      catch { toast("Couldn't copy — select the text instead.", "amber"); }
-    } }, "Copy")));
+  const copyRow = (label, url) => fieldRow(label, null, h("div", { class: "copy" }, h("code", { title: url }, url), h("button", { class: "btn sm", onclick: async (e) => {
+    try { await navigator.clipboard.writeText(url); e.target.textContent = "Copied"; setTimeout(() => { e.target.textContent = "Copy"; }, 1500); }
+    catch { toast("Couldn't copy — select the text instead.", "amber"); }
+  } }, "Copy")));
 
-  const queueBox = h("div", { class: "list" }), logBox = h("div", { class: "list log" });
+  const queueBox = h("div", { class: "list" }), queueMeta = meta(""), logBox = h("div", { class: "list log" });
+  let logN = 15;
   const drawSide = (a) => {
-    queueBox.replaceChildren(...(a.queue.length ? a.queue.slice(0, 15).map((p, i) => h("div", { class: "item" },
-      h("span", { class: "num dim", style: "width:20px" }, i + 1),
-      h("div", { class: "grow" }, h("div", { class: "trunc" }, base(p.path)), h("div", { class: "dim trunc", style: "font-size:12px" }, `${parentName(p.path)} · ${fsize(p.size)} · ${p.preset}`)),
-      h("span", { class: "num green nowrap" }, "−" + pct(p.pct)))) : [h("div", { class: "empty" }, "Nothing above your threshold.")]),
-    a.queue_total > 15 ? h("div", { class: "item dim", style: "font-size:12.5px" }, `+ ${num(a.queue_total - 15)} more, biggest savings first`) : "");
-    logBox.replaceChildren(...(a.log.length ? a.log.slice(0, 40).map(logItem) : [h("div", { class: "empty" }, "No activity yet.")]));
+    queueMeta.textContent = a.queue_total ? num(a.queue_total) : "";
+    queueBox.replaceChildren(...(a.queue.length ? a.queue.slice(0, 10).map(nextItem) : [h("div", { class: "empty" }, "Nothing above your threshold.")]),
+      a.queue_total > 10 ? h("div", { class: "more" }, `+ ${num(a.queue_total - 10)} more, biggest savings first`) : "");
+    logBox.replaceChildren(...(a.log.length ? a.log.slice(0, logN).map(logItem) : [h("div", { class: "empty" }, "No activity yet.")]),
+      a.log.length > logN ? h("button", { class: "btn ghost sm", style: "align-self:flex-start;margin:6px 10px 0", onclick: () => { logN += 50; drawSide(a); } }, "Show more") : "");
     statusLine.textContent = a.status;
     lastSweep.textContent = a.last_sweep ? `last ${ago(a.last_sweep)}` : "never";
   };
-  const lastSweep = h("span", { class: "dim", style: "font-size:12.5px" });
-  const fieldRow = (k, sub, ...ctl) => h("div", { class: "field-row" }, h("div", { class: "k" }, k, sub ? h("small", {}, sub) : null), h("div", { class: "row wrap" }, ...ctl));
+  const lastSweep = h("span", { class: "dim small" });
 
   pg.el.append(pageHead("Automation", "Keeps the library optimized on its own — one file at a time, so the NAS and your scratch disk never get flooded."),
-    h("div", { class: "grid cols-main" },
-      h("div", { class: "stack" },
-        card(null, h("div", { class: "row wrap" }, seg, h("span", { class: "row", style: "gap:6px;font-size:13px" }, modeDot, statusLine)), help),
-        card("What gets encoded",
-          fieldRow("Preferred preset", "used for everything", prefSel),
-          fieldRow("Anime preset", d.arr.sonarr ? "for series Sonarr marks as anime" : "needs Sonarr connected (Settings)", animeSel),
-          h("div", { class: "field-row", style: "display:block" },
-            h("div", { class: "k" }, "Replace automatically when the saving is at least"),
-            h("div", { class: "slider-row" }, autoR, autoV),
-            h("div", { class: "k", style: "margin-top:12px" }, "Ask me when it's at least"),
-            h("div", { class: "slider-row" }, revR, revV),
-            outcome,
-            h("p", { class: "dim", style: "font-size:12.5px;margin:10px 0 0" },
-              "The score is the estimated saving with your preset (measured from real encodes of the same show once there are some). ",
-              "An automatic encode only replaces the original if the ", h("i", {}, "real"), " saving also clears the bar and every check passes; otherwise it waits in Review. ",
-              "Files your preset would downscale, or strip of HDR or surround sound, always wait in Review."))),
-        card("Pacing",
-          fieldRow("Copy ahead", "copy the next file while the current one encodes — at most one waiting", h("label", { class: "check" }, prefetch, "on")),
-          fieldRow("Working hours", "only start new files in this window", h("label", { class: "check" }, hoursOn, "only between"), from, "and", to),
-          fieldRow("Look for new files", "re-lists folders (cheap); only new or changed files are read", "every", sweepN, "hours", sweepBtn, lastSweep),
-          fieldRow("Waiting for your OK", "stop encoding when this many automatic encodes wait in the Inbox", "at most", holdN)),
-        card(h("div", { class: "card-head" }, h("h2", {}, "Left alone"), h("span", { class: "muted num" }, d.excluded.length ? num(d.excluded.length) : "")),
-          h("p", { class: "muted", style: "margin:8px 0 0" }, "Shows or folders automation never touches. Exclude one from its details in the ", h("a", { href: "#/library" }, "Library"), " — encoding it by hand still works."),
-          exclBox),
-        card("Sonarr & Radarr",
-          h("p", { class: "muted", style: "margin:8px 0 0" }, "Point a webhook at recast and new downloads are looked at ~90 s after import, ahead of everything else."),
-          copyRow("Sonarr webhook URL", d.hooks.sonarr), copyRow("Radarr webhook URL", d.hooks.radarr),
-          h("ol", { class: "steps" },
-            h("li", {}, "In Sonarr/Radarr: ", h("b", {}, "Settings → Connect → + → Webhook")),
-            h("li", {}, "Paste the URL, method ", h("b", {}, "POST"), ", triggers ", h("b", {}, "On Import"), " and ", h("b", {}, "On Upgrade")),
-            h("li", {}, "Press ", h("b", {}, "Test"), " — it shows up in Activity here")),
-          !d.arr.sonarr && !d.arr.radarr ? h("p", { class: "amber", style: "font-size:13px;margin:10px 0 0" }, "Also add their URL + API key in ", h("a", { href: "#/settings" }, "Settings"), " so recast can map their paths to yours, spot anime, and trigger a rescan after replacing.") : "")),
-      h("div", { class: "stack" },
-        card(h("div", { class: "card-head" }, h("h2", {}, "Up next"), h("span", { class: "muted num" }, d.queue_total ? num(d.queue_total) : "")), queueBox),
-        card("Activity", logBox))));
+    h("div", { style: "padding-bottom:18px" }, h("div", { class: "mode-bar" }, seg, h("span", { class: "row small", style: "gap:6px" }, modeDot, statusLine)), help),
+    sec("What gets encoded",
+      fields(
+        fieldRow("Preferred preset", "used for everything", prefSel),
+        fieldRow("Anime preset", d.arr.sonarr ? "for series Sonarr marks as anime" : "needs Sonarr connected (Settings)", animeSel),
+        fieldRow("Replace automatically", "when the estimated saving is at least", h("div", { class: "slider-row" }, autoR, autoV)),
+        fieldRow("Ask me first", "when it's at least", h("div", { class: "slider-row" }, revR, revV))),
+      h("div", { style: "margin-top:14px" }, outcome),
+      h("p", { class: "fine" },
+        "The score is the estimated saving with your preset (measured from real encodes of the same show once there are some). ",
+        "An automatic encode only replaces the original if the ", h("i", {}, "real"), " saving also clears the bar and every check passes; otherwise it waits in Review. ",
+        "Files your preset would downscale, or strip of HDR or surround sound, always wait in Review.")),
+    sec(secHead("Up next", queueMeta), queueBox),
+    sec("Pacing", fields(
+      fieldRow("Copy ahead", "copy the next file while the current one encodes — at most one waiting", h("label", { class: "check" }, prefetch, "on")),
+      fieldRow("Working hours", "only start new files in this window", h("label", { class: "check" }, hoursOn, "only between"), from, "and", to),
+      fieldRow("Look for new files", "re-lists folders (cheap); only new or changed files are read", "every", sweepN, "hours", sweepBtn, lastSweep),
+      fieldRow("Waiting for your OK", "stop encoding when this many automatic encodes wait in Review", "at most", holdN))),
+    sec(secHead("Left alone", exclMeta),
+      h("p", { class: "lead" }, "Shows or folders automation never touches. Exclude one from its details in the ", h("a", { href: "#/library" }, "Library"), " — encoding it by hand still works."),
+      exclBox),
+    sec("Sonarr & Radarr",
+      h("p", { class: "lead" }, "Point a webhook at recast and new downloads are looked at ~90 s after import, ahead of everything else."),
+      fields(copyRow("Sonarr webhook", d.hooks.sonarr), copyRow("Radarr webhook", d.hooks.radarr)),
+      h("ol", { class: "steps" },
+        h("li", {}, "In Sonarr/Radarr: ", h("b", {}, "Settings → Connect → + → Webhook")),
+        h("li", {}, "Paste the URL, method ", h("b", {}, "POST"), ", triggers ", h("b", {}, "On Import"), " and ", h("b", {}, "On Upgrade")),
+        h("li", {}, "Press ", h("b", {}, "Test"), " — it shows up in Activity below")),
+      !d.arr.sonarr && !d.arr.radarr ? h("p", { class: "amber small", style: "margin-top:10px" }, "Also add their URL + API key in ", h("a", { href: "#/settings" }, "Settings"), " so recast can map their paths to yours, spot anime, and trigger a rescan after replacing.") : ""),
+    sec("Activity", logBox));
   drawSide(d);
+  drawExcl(d.excluded);
   refreshPreview();
   pg.every(5000, async () => { const a = await api("/api/automation").catch(() => null); if (a && pg.alive) drawSide(a); });
 };
@@ -1188,16 +1240,14 @@ const FIXED = new Set(["codec", "encoder", "resolution", "rate_mode", "audio", "
 PAGES.presets = async (pg) => {
   const P = await getPresets(true);
   if (!pg.alive) return;
-  const listBox = h("div", { class: "list preset-list", style: "gap:1px" });
-  const editor = h("div", { class: "card" });
+  const listBox = h("div", { class: "chips", style: "padding-bottom:16px" });
+  const editor = h("section", { class: "sec" });
   pg.el.append(pageHead("Presets", "How files get encoded. Encoders this machine can't run are marked ✗.",
     h("button", { class: "btn", onclick: () => edit({ name: "New preset", description: "", settings: { ...(cur ? cur.settings : P.presets[0].settings) } }, true) }, "New preset")),
-  h("div", { class: "grid", style: "grid-template-columns:minmax(0,280px) minmax(0,1fr)" }, card(null, listBox), editor));
-  if (window.innerWidth < 900) pg.el.lastChild.style.gridTemplateColumns = "minmax(0,1fr)";
+  listBox, editor);
   let cur = null;
-  const drawList = () => listBox.replaceChildren(...P.presets.map((p) => h("div", { class: "entry" + (cur && cur.name === p.name ? " on" : ""), onclick: () => edit(p) },
-    h("div", { class: "row", style: "width:100%" }, h("b", { class: "trunc grow", style: "font-weight:500" }, p.name), p.default ? h("span", { class: "badge" }, "default") : ""),
-    h("span", { class: "dim trunc", style: "font-size:12px;max-width:100%" }, p.description || p.encoder))));
+  const drawList = () => listBox.replaceChildren(...P.presets.map((p) => h("button", { class: "chip" + (cur && cur.name === p.name ? " on" : ""), title: p.description || p.encoder, onclick: () => edit(p) },
+    p.name, p.default ? h("span", { class: "badge" }, "default") : "")));
 
   function edit(p, isNew) {
     cur = isNew ? null : p;
@@ -1234,8 +1284,8 @@ PAGES.presets = async (pg) => {
     const drawForm = () => {
       const seen = new Set(GROUPS.flatMap((g) => g[1]));
       const extra = Object.keys(s).filter((k) => !seen.has(k));
-      form.replaceChildren(...[...GROUPS, ...(extra.length ? [["Other", extra]] : [])].map(([g, keys]) => h("div", { style: "margin-top:16px" },
-        h("h3", { style: "margin-bottom:10px" }, g), h("div", { class: "form-grid" }, keys.filter((k) => k in s).map(control)))));
+      form.replaceChildren(...[...GROUPS, ...(extra.length ? [["Other", extra]] : [])].map(([g, keys]) => h("div", { class: "form-group" },
+        h("h3", {}, g), h("div", { class: "form-grid" }, keys.filter((k) => k in s).map(control)))));
       drawWarn();
     };
     drawForm();
@@ -1260,8 +1310,8 @@ PAGES.presets = async (pg) => {
       if (np) edit(np);
     };
     editor.replaceChildren(
-      h("div", { class: "card-head" }, h("h2", {}, isNew ? "New preset" : p.name), toggle),
-      h("div", { class: "form-grid", style: "margin-top:12px" }, h("label", { class: "field" }, h("span", {}, "Name"), name), h("label", { class: "field" }, h("span", {}, "Description"), desc)),
+      secHead(isNew ? "New preset" : p.name, toggle),
+      h("div", { class: "form-grid", style: "margin-bottom:18px" }, h("label", { class: "field" }, h("span", {}, "Name"), name), h("label", { class: "field", style: "grid-column:span 2" }, h("span", {}, "Description"), desc)),
       warn, form, json,
       h("div", { class: "row wrap", style: "margin-top:18px" },
         h("button", { class: "btn primary", onclick: doSave }, "Save"),
@@ -1297,14 +1347,12 @@ PAGES.history = async (pg) => {
   const draw = () => {
     const rows = d.history.filter((x) => !q || (x.final || x.src).toLowerCase().includes(q)).slice(0, 500);
     box.replaceChildren(rows.length ? h("div", { class: "table-wrap" }, h("table", { class: "table" },
-      h("thead", {}, h("tr", {}, h("th", {}, "File"), h("th", { class: "hide-sm" }, "Preset"), h("th", { class: "num" }, "Before → after"), h("th", { class: "num" }, "Saved"), h("th", { class: "hide-sm" }, "When"), h("th", { class: "hide-sm" }, "Original"), h("th", {}))),
+      h("thead", {}, h("tr", {}, h("th", {}, "File"), h("th", { class: "num" }, "Before → after"), h("th", { class: "num" }, "Saved"), h("th", { class: "hide-sm" }, "When · original"), h("th", {}))),
       h("tbody", {}, rows.map((x) => h("tr", {},
-        h("td", { class: "name" }, h("div", { class: "trunc", title: x.final }, base(x.final || x.src)), h("div", { class: "sub trunc" }, parentName(x.final || x.src))),
-        h("td", { class: "hide-sm muted trunc", style: "max-width:200px" }, x.preset),
+        h("td", { class: "name" }, h("div", { class: "trunc", title: x.final }, base(x.final || x.src)), h("div", { class: "sub trunc" }, `${parentName(x.final || x.src)} · ${x.preset}`)),
         h("td", { class: "num nowrap" }, `${fsize(x.src_size)} → ${fsize(x.out_size)}`),
         h("td", { class: "num" }, x.restored ? h("span", { class: "dim" }, "—") : h("span", { class: "green" }, "−" + pct(saving(x.src_size, x.out_size)))),
-        h("td", { class: "hide-sm dim nowrap" }, ago(x.when)),
-        h("td", { class: "hide-sm dim nowrap", style: "font-size:12.5px" }, originalWhere(x, true)),
+        h("td", { class: "hide-sm nowrap" }, ago(x.when), h("div", { class: "sub" }, originalWhere(x, true))),
         h("td", { class: "right" }, x.restored ? h("span", { class: "badge" }, "restored") : x.can_restore ? h("button", { class: "btn sm ghost", onclick: async () => {
           if (!(await confirmBox("Put the original back?", `${base(x.final)} — the original returns and the re-encode moves to recast's trash.`, "Restore original"))) return;
           const r = await act(() => post("/api/history/restore", { path: x.final }));
@@ -1314,7 +1362,7 @@ PAGES.history = async (pg) => {
   const keep = d.originals === "trash" ? `Originals wait in recast's trash for ${d.trash_days} days${d.trash_max_gb ? ` (at most ${d.trash_max_gb} GB)` : ""} so you can undo — ${fsize(d.trash_bytes)} there now; that space comes back when they're purged.`
     : d.originals === "keep" ? "Originals are kept next to the new files (.orig) until you delete them." : "Originals are deleted when replaced — nothing to undo.";
   pg.el.append(pageHead("History", `${num(live.length)} file${live.length === 1 ? "" : "s"} re-encoded · ${fsize(saved)} saved. ${keep}`,
-    h("input", { type: "search", placeholder: "Filter…", oninput: debounce((e) => { q = e.target.value.toLowerCase(); draw(); }, 120) })), card(null, box));
+    h("input", { type: "search", placeholder: "Filter…", oninput: debounce((e) => { q = e.target.value.toLowerCase(); draw(); }, 120) })), box);
   draw();
 };
 
@@ -1324,7 +1372,6 @@ PAGES.settings = async (pg) => {
   if (!pg.alive) return;
   const st = d.settings;
   const saveKey = async (k, v) => { if (await act(() => put("/api/settings", { [k]: v }))) { st[k] = v; toast("Saved", "", 1500); } };
-  const fieldRow = (k, sub, ...ctl) => h("div", { class: "field-row" }, h("div", { class: "k" }, k, sub ? h("small", {}, sub) : null), h("div", { class: "row wrap" }, ...ctl));
   const chk = (k) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: st[k], onchange: (e) => saveKey(k, e.target.checked) }), "on");
 
   // library folders
@@ -1333,7 +1380,7 @@ PAGES.settings = async (pg) => {
   const newRoot = h("input", { type: "text", placeholder: "/Volumes/nas/tv  or  \\\\nas\\media\\tv", list: "dl-sugg", style: "flex:1;min-width:220px" });
   const drawRoots = () => rootsBox.replaceChildren(...roots.map((r, i) => h("div", { class: "item" },
     h("i", { class: "dot " + (r.reachable === false ? "red" : "green"), title: r.reachable === false ? "not reachable right now" : "reachable" }),
-    h("div", { class: "grow" }, h("div", {}, r.name), h("div", { class: "dim mono trunc" }, r.path)),
+    h("span", { style: "font-weight:500;flex:0 1 auto", class: "trunc" }, r.name), h("span", { class: "dim mono trunc grow" }, r.path),
     r.remote ? h("span", { class: "badge" }, "network") : h("span", { class: "badge" }, "local"),
     h("button", { class: "btn sm ghost", onclick: () => { roots.splice(i, 1); drawRoots(); } }, "Remove"))),
   roots.length ? "" : h("div", { class: "empty" }, "No library folders."));
@@ -1348,7 +1395,7 @@ PAGES.settings = async (pg) => {
     const a = d[kind];
     const url = h("input", { type: "url", value: a.url, placeholder: kind === "sonarr" ? "http://nas:8989" : "http://nas:7878", style: "flex:1;min-width:200px" });
     const key = h("input", { type: "password", placeholder: a.has_key ? "saved — type to replace" : "API key (Settings → General)", style: "flex:1;min-width:200px", autocomplete: "off" });
-    const out = h("div", { style: "font-size:13px;margin-top:8px" }, a.path_map.length ? h("span", { class: "muted" }, "Paths: " + a.path_map.map(([x, y]) => `${x} → ${y}`).join(" · ")) : "");
+    const out = h("div", { class: "small", style: "margin-top:6px" }, a.path_map.length ? h("span", { class: "muted" }, "Paths: " + a.path_map.map(([x, y]) => `${x} → ${y}`).join(" · ")) : "");
     const test = h("button", { class: "btn", onclick: async () => {
       test.disabled = true;
       const body = { [kind]: { url: url.value.trim() } };
@@ -1363,9 +1410,9 @@ PAGES.settings = async (pg) => {
       }
       test.disabled = false;
     } }, "Save & test");
-    return h("div", { style: "margin-top:12px" }, h("div", { class: "row", style: "margin-bottom:6px" }, h("b", { style: "font-weight:500" }, label), a.url && a.has_key ? h("span", { class: "badge green" }, "configured") : ""),
-      h("div", { class: "row wrap" }, url, key, test,
-        a.url ? h("button", { class: "btn ghost", onclick: async () => { if (await act(() => put("/api/settings", { [kind]: { clear: true } }))) route(); } }, "Remove") : ""), out);
+    return h("div", { class: "field-row", style: "align-items:start" }, h("div", { class: "k row", style: "padding-top:5px" }, label, a.url && a.has_key ? h("span", { class: "badge green" }, "configured") : ""),
+      h("div", {}, h("div", { class: "row wrap" }, url, key, test,
+        a.url ? h("button", { class: "btn ghost", onclick: async () => { if (await act(() => put("/api/settings", { [kind]: { clear: true } }))) route(); } }, "Remove") : ""), out));
   };
 
   // security
@@ -1396,46 +1443,46 @@ PAGES.settings = async (pg) => {
 
   pg.el.append(pageHead("Settings", `Config lives in ${d.config_dir}`),
     h("datalist", { id: "dl-sugg" }, d.suggestions.map((s) => h("option", { value: s }))),
-    h("div", { class: "stack" },
-      card("Library folders", rootsBox,
-        h("div", { class: "row wrap", style: "margin-top:12px" }, newRoot, h("button", { class: "btn", onclick: () => {
-          const p = newRoot.value.trim();
-          if (!p) return;
-          roots.push({ name: base(p), path: p, remote: /^(\/Volumes\/|\/mnt\/|\\\\|\/\/)/.test(p) });
-          newRoot.value = ""; drawRoots();
-        } }, "Add"), h("button", { class: "btn primary", onclick: saveRoots }, "Save folders"))),
-      card("Scratch & replacing",
-        fieldRow("Scratch folder", "local disk: files are copied here, encoded, then written back", h("input", { type: "text", value: st.scratch, style: "flex:1;min-width:240px", onchange: (e) => saveKey("scratch", e.target.value) })),
-        fieldRow("Scratch budget", "stop starting new work while finished encodes waiting for you use more than this", h("input", { type: "number", min: 5, value: st.max_scratch_gb, onchange: (e) => saveKey("max_scratch_gb", Number(e.target.value)) }), "GB"),
-        fieldRow("Originals", "what happens to the file being replaced",
-          h("select", { onchange: (e) => saveKey("originals", e.target.value) },
-            [["trash", "Move to recast's trash (undo possible)"], ["keep", "Keep next to the new file (.orig)"], ["delete", "Delete"]].map(([v, l]) => h("option", { value: v, selected: st.originals === v }, l)))),
-        fieldRow("Empty the trash after", "originals stay on the share until then — that's what makes restore instant", h("input", { type: "number", min: 1, value: st.trash_days, onchange: (e) => saveKey("trash_days", Number(e.target.value)) }), "days"),
-        fieldRow("Trash size limit", "purge the oldest days early when the trash holds more than this (0 = no limit)", h("input", { type: "number", min: 0, value: st.trash_max_gb, onchange: (e) => saveKey("trash_max_gb", Number(e.target.value)) }), "GB"),
-        fieldRow("Keep free on the library drive", "automation pauses below this — replaced originals use space until they're purged", h("input", { type: "number", min: 0, value: st.min_free_gb, onchange: (e) => saveKey("min_free_gb", Number(e.target.value)) }), "GB"),
-        fieldRow("Decode test", "decode the whole output once before it can replace anything", chk("verify_decode")),
-        fieldRow("Rename codec in file names", "“… AV1.mkv” → “… HEVC.mkv”", chk("rename_codec")),
-        fieldRow("Rescan Sonarr/Radarr after replacing", null, chk("rescan_after_replace")),
-        fieldRow("Keep the computer awake", "while jobs run", chk("keep_awake")),
-        fieldRow("Default preset", "used for ranking and as the starting choice",
-          h("select", { onchange: async (e) => { await saveKey("default_preset", e.target.value); S.info.default_preset = e.target.value; } },
-            (await getPresets()).presets.map((p) => h("option", { value: p.name, selected: p.name === st.default_preset }, p.name))))),
-      card("Sonarr & Radarr", h("p", { class: "muted", style: "margin:6px 0 0" }, "Optional. Adds show names and episode titles, spots anime, maps their paths to yours for webhooks, and triggers a rescan after a replace."),
-        arrCard("sonarr", "Sonarr"), arrCard("radarr", "Radarr")),
-      card("Security", h("p", { class: "muted", style: "margin:6px 0 12px" }, d.protected ? "A password is required to open recast in a browser." : "No password. Fine when recast only listens on this computer (the default); set one before exposing it to your network."), secBox),
-      card("This machine",
-        h("div", { class: "kv", style: "margin-top:12px" },
-          h("span", {}, "Computer"), h("span", {}, [d.machine.host, d.machine.os].filter(Boolean).join(" · ")),
-          h("span", {}, "CPU / GPU"), h("span", {}, [d.machine.cpu, d.machine.gpu].filter(Boolean).join(" · ")),
-          h("span", {}, "ffmpeg"), h("span", { class: "mono" }, `${d.ffmpeg_version} · ${d.ffmpeg}`),
-          h("span", {}, "Detected"), h("span", {}, d.detected_at || "—"),
-          h("span", {}, "recast"), h("span", {}, `v${S.info.version}`, S.info.update ? h("span", { class: "blue" }, " · ", h("a", { href: S.info.update.url, target: "_blank", rel: "noopener" }, `v${S.info.update.version} is out`)) : " · up to date")),
-        S.info.update ? h("div", { class: "estimate", style: "margin-top:10px" }, "To update, on the server: ", h("code", {}, "docker compose pull && docker compose up -d"),
-          h("div", { class: "dim", style: "font-size:12px;margin-top:4px" }, "Settings, queue and history live in /config and carry over.")) : "",
-        h("div", { class: "table-wrap", style: "margin-top:12px" }, h("table", { class: "table" }, h("tbody", {}, encRows.map(([n, c]) => h("tr", {},
-          h("td", { class: "mono" }, n), h("td", {}, c.status === "ok" ? h("span", { class: "green" }, "✓ works") : h("span", { class: c.status === "failed" ? "red" : "dim" }, "✗ " + (c.reason || c.status))),
-          h("td", { class: "num muted" }, c.fps ? `~${Math.round(c.fps)} fps @1080p` : "")))))),
-        h("div", { style: "margin-top:12px" }, detectBtn), detectLines)));
+    sec("Library folders", rootsBox,
+      h("div", { class: "row wrap", style: "margin-top:12px" }, newRoot, h("button", { class: "btn", onclick: () => {
+        const p = newRoot.value.trim();
+        if (!p) return;
+        roots.push({ name: base(p), path: p, remote: /^(\/Volumes\/|\/mnt\/|\\\\|\/\/)/.test(p) });
+        newRoot.value = ""; drawRoots();
+      } }, "Add"), h("button", { class: "btn primary", onclick: saveRoots }, "Save folders"))),
+    sec("Scratch & replacing", fields(
+      fieldRow("Scratch folder", "local disk: files are copied here, encoded, then written back", h("input", { type: "text", value: st.scratch, style: "flex:1;min-width:240px", onchange: (e) => saveKey("scratch", e.target.value) })),
+      fieldRow("Scratch budget", "stop starting new work while finished encodes waiting for you use more than this", h("input", { type: "number", min: 5, value: st.max_scratch_gb, onchange: (e) => saveKey("max_scratch_gb", Number(e.target.value)) }), "GB"),
+      fieldRow("Originals", "what happens to the file being replaced",
+        h("select", { onchange: (e) => saveKey("originals", e.target.value) },
+          [["trash", "Move to recast's trash (undo possible)"], ["keep", "Keep next to the new file (.orig)"], ["delete", "Delete"]].map(([v, l]) => h("option", { value: v, selected: st.originals === v }, l)))),
+      fieldRow("Empty the trash after", "originals stay on the share until then — that's what makes restore instant", h("input", { type: "number", min: 1, value: st.trash_days, onchange: (e) => saveKey("trash_days", Number(e.target.value)) }), "days"),
+      fieldRow("Trash size limit", "purge the oldest days early when the trash holds more than this (0 = no limit)", h("input", { type: "number", min: 0, value: st.trash_max_gb, onchange: (e) => saveKey("trash_max_gb", Number(e.target.value)) }), "GB"),
+      fieldRow("Keep free on the library drive", "automation pauses below this — replaced originals use space until they're purged", h("input", { type: "number", min: 0, value: st.min_free_gb, onchange: (e) => saveKey("min_free_gb", Number(e.target.value)) }), "GB"),
+      fieldRow("Decode test", "decode the whole output once before it can replace anything", chk("verify_decode")),
+      fieldRow("Rename codec in file names", "“… AV1.mkv” → “… HEVC.mkv”", chk("rename_codec")),
+      fieldRow("Rescan Sonarr/Radarr after replacing", null, chk("rescan_after_replace")),
+      fieldRow("Keep the computer awake", "while jobs run", chk("keep_awake")),
+      fieldRow("Default preset", "used for ranking and as the starting choice",
+        h("select", { onchange: async (e) => { await saveKey("default_preset", e.target.value); S.info.default_preset = e.target.value; } },
+          (await getPresets()).presets.map((p) => h("option", { value: p.name, selected: p.name === st.default_preset }, p.name)))))),
+    sec("Sonarr & Radarr", h("p", { class: "lead" }, "Optional. Adds show names and episode titles, spots anime, maps their paths to yours for webhooks, and triggers a rescan after a replace."),
+      fields(arrCard("sonarr", "Sonarr"), arrCard("radarr", "Radarr"))),
+    sec("Security", h("p", { class: "lead" }, d.protected ? "A password is required to open recast in a browser." : "No password. Fine when recast only listens on this computer (the default); set one before exposing it to your network."), secBox),
+    sec("This machine",
+      h("div", { class: "kv wide" },
+        h("span", {}, "Computer"), h("span", {}, [d.machine.host, d.machine.os].filter(Boolean).join(" · ")),
+        h("span", {}, "CPU / GPU"), h("span", {}, [d.machine.cpu, d.machine.gpu].filter(Boolean).join(" · ")),
+        h("span", {}, "ffmpeg"), h("span", { class: "mono trunc", title: d.ffmpeg }, `${d.ffmpeg_version} · ${d.ffmpeg}`),
+        h("span", {}, "Detected"), h("span", {}, d.detected_at || "—"),
+        h("span", {}, "recast"), h("span", {}, `v${S.info.version}`, S.info.update ? h("span", { class: "blue" }, " · ", h("a", { href: S.info.update.url, target: "_blank", rel: "noopener" }, `v${S.info.update.version} is out`)) : " · up to date")),
+      S.info.update ? h("div", { class: "estimate", style: "margin-top:12px" }, "To update, on the server: ", h("code", {}, "docker compose pull && docker compose up -d"),
+        h("div", { class: "dim small", style: "margin-top:2px" }, "Settings, queue and history live in /config and carry over.")) : "",
+      h("h3", { style: "margin:16px 0 6px" }, "Encoders"),
+      h("div", { class: "table-wrap" }, h("table", { class: "table" }, h("tbody", {}, encRows.map(([n, c]) => h("tr", {},
+        h("td", { class: "mono" }, n), h("td", {}, c.status === "ok" ? h("span", { class: "green" }, "✓ works") : h("span", { class: c.status === "failed" ? "red" : "dim" }, "✗ " + (c.reason || c.status))),
+        h("td", { class: "num muted" }, c.fps ? `~${Math.round(c.fps)} fps @1080p` : "")))))),
+      h("div", { style: "margin-top:12px" }, detectBtn), detectLines));
 };
 
 // ───────────────────────────── setup ─────────────────────────────
@@ -1459,7 +1506,7 @@ PAGES.setup = async (pg) => {
   } }, detected ? "Detect again" : "Detect hardware");
   const chips = h("div", { class: "chips" });
   const drawChips = () => chips.replaceChildren(...[...new Set([...d.suggestions, ...picked])].map((p) =>
-    h("button", { class: "chip" + (picked.has(p) ? " on" : ""), onclick: () => { picked.has(p) ? picked.delete(p) : picked.add(p); drawChips(); } }, (picked.has(p) ? "✓ " : "") + p)));
+    h("button", { class: "chip mono" + (picked.has(p) ? " on" : ""), onclick: () => { picked.has(p) ? picked.delete(p) : picked.add(p); drawChips(); } }, (picked.has(p) ? "✓ " : "") + p)));
   drawChips();
   const manual = h("input", { type: "text", placeholder: "or type a folder path", style: "flex:1" });
   const scratch = h("input", { type: "text", value: d.scratch, style: "width:100%" });
@@ -1470,15 +1517,15 @@ PAGES.setup = async (pg) => {
     renderShell(); location.hash = "#/library"; route();
   } }, "Finish setup");
   // no sidebar during setup
-  $("#app").replaceChildren(h("div", { class: "center" }, h("div", { class: "narrow stack" },
-    h("div", { class: "brand", style: "padding:0" }, h("div", { class: "brand-mark" }, "r"), h("span", {}, "recast")),
-    h("div", {}, h("h1", {}, "Set up this machine"), h("p", { class: "muted", style: "margin:4px 0 0" }, "Three steps. Each computer you install recast on detects its own hardware.")),
-    card(h("div", { class: "card-head" }, h("h2", {}, "1 · Hardware"), detectState),
-      h("p", { class: "muted", style: "margin:8px 0 10px" }, "Finds ffmpeg and tests which encoders actually work here (GPU, Quick Sync, VideoToolbox, CPU)."), detectBtn, lines),
-    card("2 · Library folders", h("p", { class: "muted", style: "margin:8px 0 10px" }, "Where your shows and movies live. Network shares are fine — files are copied to this computer to encode."),
+  $("#app").replaceChildren(h("div", { class: "center" }, h("div", { class: "narrow" },
+    h("div", { class: "brand", style: "margin-bottom:18px" }, h("div", { class: "brand-mark" }, "r"), h("span", {}, "recast")),
+    h("div", { style: "padding-bottom:16px" }, h("h1", {}, "Set up this machine"), h("p", { class: "muted", style: "margin-top:4px" }, "Three steps. Each computer you install recast on detects its own hardware.")),
+    sec(secHead("1 · Hardware", detectState),
+      h("p", { class: "lead" }, "Finds ffmpeg and tests which encoders actually work here (GPU, Quick Sync, VideoToolbox, CPU)."), detectBtn, h("div", { style: "margin-top:10px" }, lines)),
+    sec("2 · Library folders", h("p", { class: "lead" }, "Where your shows and movies live. Network shares are fine — files are copied to this computer to encode."),
       chips, h("div", { class: "row", style: "margin-top:10px" }, manual, h("button", { class: "btn", onclick: () => { if (manual.value.trim()) { picked.add(manual.value.trim()); manual.value = ""; drawChips(); } } }, "Add"))),
-    card("3 · Scratch folder", h("p", { class: "muted", style: "margin:8px 0 10px" }, "A folder on a local disk with room for a few episodes."), scratch),
-    h("div", { class: "row" }, h("span", { class: "spacer" }), finish))));
+    sec("3 · Scratch folder", h("p", { class: "lead" }, "A folder on a local disk with room for a few episodes."), scratch),
+    h("div", { class: "row", style: "border-top:1px solid var(--border);padding-top:14px" }, h("span", { class: "spacer" }), finish))));
 };
 
 // ───────────────────────────── login / boot ─────────────────────────────
@@ -1490,8 +1537,8 @@ function renderLogin() {
     e.preventDefault();
     try { await api("/api/login", { method: "POST", body: { password: pw.value } }); boot(); } catch (x) { err.textContent = x.message; pw.select(); }
   };
-  $("#app").replaceChildren(h("div", { class: "center" }, h("form", { class: "card narrow stack", style: "max-width:360px", onsubmit: submit },
-    h("div", { class: "brand", style: "padding:0" }, h("div", { class: "brand-mark" }, "r"), h("span", {}, "recast")),
+  $("#app").replaceChildren(h("div", { class: "center" }, h("form", { class: "narrow stack", style: "max-width:320px", onsubmit: submit },
+    h("div", { class: "brand", style: "margin-bottom:6px" }, h("div", { class: "brand-mark" }, "r"), h("span", {}, "recast")),
     pw, err, h("button", { class: "btn primary", type: "submit" }, "Sign in"))));
   pw.focus();
 }

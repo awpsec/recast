@@ -1,4 +1,4 @@
-"""`recast web`: the daemon (engine + automation) with a browser UI.
+"""recast-server's web app: the engine + automation daemon behind a browser UI.
 
 One process owns the queue. The browser talks JSON to /api/* and listens to /api/events
 (server-sent events) for live progress. Sonarr/Radarr post to /api/hook/<kind>?token=….
@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import io
 import json
+import logging
 import os
 import secrets
 import socket
@@ -24,10 +25,13 @@ from ..arr import ArrClient, ArrError, auto_map
 from ..config import Root, config_dir, default_scratch, is_network_path, machine_summary, suggest_libraries
 from ..encode import (CODEC_LABEL, SCHEMA, EncodeSettings, already_target, bitrate_word, crf_word, delete_preset,
                       est_bytes, est_fps, resolve_encoder, save_preset, skip_reason)
+from ..automation import MODES
 from ..engine import ACTIVE, LIVE, Batch, Job, norm
 from ..overview import duplicate_groups, pretty_title
 from ..probe import VIDEO_EXT
-from ..service import Service, instance_lock, release_lock
+from ..service import Service
+
+log = logging.getLogger("recast")
 
 STATIC = Path(__file__).parent / "static"
 SESSION_COOKIE = "recast_session"
@@ -155,14 +159,18 @@ def _media_dict(m) -> dict:
 
 # ───────────────────────────── app ─────────────────────────────
 
-def create_app(svc: Service, host: str = "127.0.0.1", port: int = 8484) -> web.Application:
+def create_app(svc: Service, host: str = "127.0.0.1", port: int = 8484, auto_detect: bool = False) -> web.Application:
     app = web.Application(middlewares=[_auth_middleware], client_max_size=4 * 1024**2)
-    app["svc"], app["host"], app["port"] = svc, host, port
+    app["svc"], app["host"], app["port"], app["auto_detect"] = svc, host, port, auto_detect
+    if not svc.cfg.webhook_token:
+        svc.cfg.webhook_token = secrets.token_urlsafe(18)
+        if not svc.cfg.needs_setup:
+            svc.cfg.save()
     app["clients"]: set[asyncio.Queue] = set()
     app["sessions"]: set[str] = set()
     app["setup"] = {"lines": [], "running": False, "caps": None}
     app["folder_probes"] = set()
-    app["rt"] = {"loop": None, "runner": None, "sweeping": False, "tasks": set()}  # mutable after start
+    app["rt"] = {"loop": None, "runner": None, "sweeping": False, "tasks": set(), "update": None}  # mutable after start
 
     def on_event(kind: str, obj) -> None:
         msg = {"type": "event", "kind": kind}
@@ -179,6 +187,7 @@ def create_app(svc: Service, host: str = "127.0.0.1", port: int = 8484) -> web.A
         if loop:
             loop.call_soon_threadsafe(_broadcast, app, msg)
     svc.subscribe(on_event)
+    svc.subscribe(_log_event)
 
     r = app.router
     r.add_get("/", _index)
@@ -186,6 +195,7 @@ def create_app(svc: Service, host: str = "127.0.0.1", port: int = 8484) -> web.A
     r.add_static("/static/", STATIC, show_index=False)
     r.add_post("/api/login", _login)
     r.add_post("/api/logout", _logout)
+    r.add_get("/api/health", _health)
     r.add_get("/api/state", _state)
     r.add_get("/api/events", _events)
     r.add_get("/api/library/overview", _overview)
@@ -209,6 +219,7 @@ def create_app(svc: Service, host: str = "127.0.0.1", port: int = 8484) -> web.A
     r.add_post("/api/automation/review/skip-all", _skip_all)
     r.add_post("/api/automation/review/{action}", _review_action)
     r.add_post("/api/automation/sweep", _sweep)
+    r.add_post("/api/automation/exclude", _exclude)
     r.add_post("/api/hook/{kind}", _hook)
     r.add_get("/api/presets", _presets)
     r.add_put("/api/presets", _preset_put)
@@ -229,7 +240,7 @@ def create_app(svc: Service, host: str = "127.0.0.1", port: int = 8484) -> web.A
 
 
 # ── auth ──
-PUBLIC = ("/login", "/api/login", "/static/", "/api/hook/")
+PUBLIC = ("/login", "/api/login", "/static/", "/api/hook/", "/api/health")
 
 
 @web.middleware
@@ -324,7 +335,37 @@ async def _events(request):
     return resp
 
 
+def _log_event(kind: str, obj) -> None:
+    """One line per thing that happened, for `docker logs` / journalctl."""
+    if isinstance(obj, tuple) and obj and isinstance(obj[0], Job):
+        obj = obj[0]
+    if isinstance(obj, Job):
+        name = obj.name
+        if kind == "replaced":
+            log.info("replaced  %s · %s", name, obj.result)
+        elif kind == "failed":
+            log.warning("failed    %s · %s", name, obj.error)
+        elif kind in ("finished", "flagged") or (kind == "auto_done" and obj.stage == "awaiting"):
+            log.info("needs you %s · %s", name, obj.flag or obj.note or "encoded, waiting for approval")
+        elif kind == "no_space":
+            log.warning("no space  %s · scratch is full", name)
+    elif isinstance(obj, Batch) and kind in ("batch_done", "batch_replaced"):
+        log.info("%s %s", "batch done" if kind == "batch_done" else "batch replaced", obj.name)
+    elif kind == "restored" and isinstance(obj, dict):
+        log.info("restored  %s", os.path.basename(obj.get("src", "")))
+
+
+async def _health(request):
+    """For Docker HEALTHCHECK / uptime monitors. No login, nothing sensitive."""
+    svc: Service = request.app["svc"]
+    from .. import __version__
+    return _ok(version=__version__, setup=not svc.cfg.needs_setup,
+               active=sum(1 for j in svc.engine.jobs.values() if j.stage in ACTIVE),
+               automation=svc.cfg.auto_mode)
+
+
 async def _state(request):
+    from .. import __version__
     svc: Service = request.app["svc"]
     app = request.app
     host = app["host"]
@@ -335,6 +376,7 @@ async def _state(request):
                 "presets": list(svc.presets), "default_preset": svc.cfg.default_preset,
                 "hevc_encoder": resolve_encoder(EncodeSettings(), svc.cfg.encoders)[0] if svc.cfg.encoders else "",
                 "protected": bool(svc.cfg.web_password_hash), "exposed": exposed,
+                "version": __version__, "update": app["rt"]["update"],
                 "potential": sum(s.saves for r in svc.cfg.roots for s in svc.scanner.stats.get(r.path, [])),
                 "scanned": bool(svc.scanner.stats)})
 
@@ -451,8 +493,9 @@ async def _details(request):
         ep = await asyncio.to_thread(svc.arr.episode, rec, path) if rec and svc.arr else None
         return _ok({"kind": "file", "path": path, "name": os.path.basename(path), "media": _media_dict(m),
                     "gains": [] if h else _gains(svc, [m], path),
-                    "history": h and {**h, "can_restore": bool(h.get("orig") and os.path.exists(h["orig"]))},
+                    "history": h and _history_row(svc, h),
                     "review": svc.automation.review.get(path), "arr": rec, "episode": ep,
+                    "excluded": svc.automation.excluded(path),
                     "remote": bool(svc.root_for(path) and svc.root_for(path).remote)})
     entries = await asyncio.to_thread(_walk, path)
     infos, missing = [], []
@@ -479,7 +522,8 @@ async def _details(request):
                 "files": len(entries), "size": sum(e[1] for e in entries), "read": len(infos),
                 "partial": bool(missing), "codecs": codecs, "gains": _gains(svc, infos, path),
                 "recast": {"files": k, "before": before, "after": after}, "arr": rec,
-                "last_used": svc.engine.last_used(path)})
+                "last_used": svc.engine.last_used(path), "excluded": svc.automation.excluded(path),
+                "excluded_here": any(norm(x) == norm(path) for x in svc.cfg.auto_exclude)})
 
 
 # ── encoding ──
@@ -625,7 +669,7 @@ async def _compare(request):
     j = svc.engine.jobs.get(int(request.match_info["id"]))
     if not j or not j.out or not os.path.exists(j.out):
         raise web.HTTPNotFound()
-    from ..ui.frames import grab_frame, side_by_side
+    from ..frames import grab_frame, side_by_side
     pos = min(0.99, max(0.0, float(request.query.get("pos", 0.5))))
     side = request.query.get("side", "split")
     t = j.info.get("duration", 0) * pos
@@ -669,7 +713,7 @@ async def _inbox_action(request):
 
 # ── automation ──
 AUTO_KEYS = ("auto_mode", "auto_preset", "auto_preset_anime", "auto_threshold", "review_threshold", "auto_hours",
-             "sweep_hours", "prefetch")
+             "sweep_hours", "prefetch", "auto_hold_max")
 
 
 def _hook_urls(request) -> dict:
@@ -701,6 +745,7 @@ async def _automation(request):
                 "review_total": len(review), "review_reasons": reasons,
                 "log": a.log[-150:][::-1], "last_sweep": a.last_sweep, "pending": a.pending,
                 "hooks": _hook_urls(request), "presets": list(svc.presets), "default_preset": cfg.default_preset,
+                "excluded": cfg.auto_exclude,
                 "arr": {"sonarr": cfg.sonarr.enabled, "radarr": cfg.radarr.enabled}})
 
 
@@ -714,10 +759,10 @@ async def _automation_put(request):
             v = body[k]
             if k in ("auto_threshold", "review_threshold"):
                 v = min(0.95, max(0.0, float(v)))
-            elif k == "sweep_hours":
+            elif k in ("sweep_hours", "auto_hold_max"):
                 v = max(1, int(v))
-            elif k == "auto_mode" and v not in ("off", "dry", "on"):
-                return _err("mode must be off, dry or on")
+            elif k == "auto_mode" and v not in MODES:
+                return _err("mode must be one of " + ", ".join(MODES))
             elif k == "prefetch":
                 v = bool(v)
             setattr(cfg, k, v)
@@ -753,6 +798,15 @@ async def _skip_all(request):
     body = await request.json()
     n = await asyncio.to_thread(svc.automation.skip_many, body.get("reason"))
     return _ok(skipped=n)
+
+
+async def _exclude(request):
+    """Leave a show/folder out of automation (or bring it back). Manual encodes still work there."""
+    svc: Service = request.app["svc"]
+    body = await request.json()
+    path = _path_arg(request, svc, body=body)
+    await asyncio.to_thread(svc.automation.set_excluded, path, bool(body.get("on", True)))
+    return _ok(excluded=svc.cfg.auto_exclude)
 
 
 async def _sweep(request):
@@ -837,8 +891,8 @@ async def _preset_default(request):
 
 
 # ── settings ──
-SETTING_KEYS = ("scratch", "max_scratch_gb", "prefetch", "originals", "trash_days", "verify_decode", "rename_codec",
-                "keep_awake", "rescan_after_replace", "default_preset")
+SETTING_KEYS = ("scratch", "max_scratch_gb", "prefetch", "originals", "trash_days", "trash_max_gb", "min_free_gb",
+                "verify_decode", "rename_codec", "keep_awake", "rescan_after_replace", "default_preset")
 
 
 async def _settings(request):
@@ -909,13 +963,30 @@ async def _arr_test(request):
 
 
 # ── history ──
+def _history_row(svc: Service, h: dict) -> dict:
+    """A replaced file and where its original is: in the trash until a date, kept as .orig, purged, deleted."""
+    orig = h.get("orig", "")
+    if h.get("restored"):
+        where = "restored"
+    elif h.get("purged"):
+        where = "purged"
+    elif not orig:
+        where = "deleted"
+    elif not os.path.exists(orig):
+        where = "missing"
+    else:
+        where = "trash" if ".recast-trash" in orig else "kept"
+    return {**{k: h.get(k) for k in ("src", "final", "preset", "src_size", "out_size", "when", "restored", "purged")},
+            "original": where, "kept_until": svc.engine.kept_until(h) if where == "trash" else 0,
+            "can_restore": where in ("trash", "kept")}
+
+
 async def _history(request):
     svc: Service = request.app["svc"]
-    out = []
-    for h in reversed(svc.engine.history[-1000:]):
-        out.append({**{k: h.get(k) for k in ("src", "final", "preset", "src_size", "out_size", "when", "restored")},
-                    "can_restore": bool(not h.get("restored") and h.get("orig") and os.path.exists(h["orig"]))})
-    return _ok(history=out)
+    rows = await asyncio.to_thread(lambda: [_history_row(svc, h) for h in reversed(svc.engine.history[-1000:])])
+    cfg = svc.cfg
+    return _ok(history=rows, originals=cfg.originals, trash_days=cfg.trash_days, trash_max_gb=cfg.trash_max_gb,
+               trash_bytes=svc.engine.trash_bytes(), saved=svc.saved_total())
 
 
 async def _restore(request):
@@ -943,10 +1014,15 @@ async def _setup_get(request):
 
 
 async def _setup_detect(request):
-    app = request.app
-    st = app["setup"]
-    if st["running"]:
+    if request.app["setup"]["running"]:
         return _err("already detecting")
+    _detect(request.app)
+    return _ok()
+
+
+def _detect(app) -> None:
+    """Find ffmpeg and test every encoder on this machine (in a thread; progress lines in app["setup"])."""
+    st = app["setup"]
     st.update(lines=[], running=True, caps=None)
 
     def run():
@@ -975,8 +1051,9 @@ async def _setup_detect(request):
             st["lines"].append("✓ done")
         finally:
             st["running"] = False
+            for line in st["lines"]:
+                log.info("detect    %s", line)
     _spawn(app, asyncio.to_thread(run), "detect")
-    return _ok()
 
 
 async def _setup_save(request):
@@ -1001,12 +1078,18 @@ async def _setup_save(request):
     svc.cfg.roots, svc.cfg.scratch = roots, scratch
     svc.cfg.save()
     svc.probes.ffprobe = svc.cfg.ffprobe
-    for r in roots:
-        _spawn(request.app, asyncio.to_thread(svc.scanner.scan, r.path, True), "scan")
-    return _ok()
+    return _ok()  # the service loop notices setup is done and lists the library
 
 
 # ───────────────────────────── the service loop ─────────────────────────────
+
+async def _check_update(app) -> None:
+    from ..update import check
+    rel = await asyncio.to_thread(check)
+    app["rt"]["update"] = rel and {"version": rel["version"], "url": rel["url"]}
+    if rel:
+        log.info("recast %s is out (%s) — docker compose pull && docker compose up -d", rel["version"], rel["url"])
+
 
 def _spawn(app, coro, name: str) -> None:
     t = asyncio.ensure_future(coro)
@@ -1017,6 +1100,8 @@ def _spawn(app, coro, name: str) -> None:
 async def _start(app):
     app["rt"]["loop"] = asyncio.get_running_loop()
     app["rt"]["runner"] = asyncio.ensure_future(_service_loop(app))
+    if app["auto_detect"]:  # headless first run (Docker): libraries came from the environment
+        _detect(app)
 
 
 async def _stop(app):
@@ -1027,24 +1112,33 @@ async def _stop(app):
     svc.automation.save(force=True)
 
 
+async def _service_start(app):
+    """Once per run, as soon as setup is complete: cached listings, scores, Sonarr/Radarr, housekeeping."""
+    svc: Service = app["svc"]
+    for r in svc.cfg.roots:
+        await asyncio.to_thread(svc.scanner.load_cached, r.path)
+    if not svc.automation.last_sweep and svc.scanner.snap_when:  # a recent listing (e.g. from the terminal
+        svc.automation.last_sweep = min(svc.scanner.snap_when.values())  # app) counts: no NAS re-list now
+    await asyncio.to_thread(svc.automation.rebuild)
+    if svc.connect_arr():
+        _spawn(app, asyncio.to_thread(svc.arr.refresh), "arr")
+    if svc.automation.sweep_due():
+        _spawn(app, _run_sweep(app), "sweep")
+    await asyncio.to_thread(svc.engine.clean_scratch)
+    await asyncio.to_thread(svc.engine.purge_trash)
+    log.info("ready · %d library folder(s) · automation %s", len(svc.cfg.roots), svc.cfg.auto_mode)
+
+
 async def _service_loop(app):
     svc: Service = app["svc"]
-    if not svc.cfg.needs_setup:
-        for r in svc.cfg.roots:
-            await asyncio.to_thread(svc.scanner.load_cached, r.path)
-        if not svc.automation.last_sweep and svc.scanner.snap_when:  # a recent listing (e.g. from the terminal
-            svc.automation.last_sweep = min(svc.scanner.snap_when.values())  # app) counts: no NAS re-list now
-        await asyncio.to_thread(svc.automation.rebuild)
-        if svc.connect_arr():
-            _spawn(app, asyncio.to_thread(svc.arr.refresh), "arr")
-        if svc.automation.sweep_due():
-            _spawn(app, _run_sweep(app), "sweep")
-        await asyncio.to_thread(svc.engine.clean_scratch)
-        await asyncio.to_thread(svc.engine.purge_trash)
+    started = False
     n = 0
     while True:
         try:
-            if not svc.cfg.needs_setup:
+            if not started and not svc.cfg.needs_setup:
+                started = True
+                await _service_start(app)
+            if started:
                 svc.engine.tick()
                 if n % 8 == 0:
                     svc.automation.tick()
@@ -1057,8 +1151,10 @@ async def _service_loop(app):
                     svc.automation.save()
                 if n % 14400 == 0 and n and svc.arr:
                     _spawn(app, asyncio.to_thread(svc.arr.refresh), "arr")
-                if n % 345600 == 0 and n:  # daily
+                if n % 14400 == 0 and n:  # hourly (also enforces the trash size cap soon after replaces)
                     _spawn(app, asyncio.to_thread(svc.engine.purge_trash), "trash")
+            if n % 345600 == 0 and not os.environ.get("RECAST_NO_UPDATE_CHECK"):  # daily: newer release?
+                _spawn(app, _check_update(app), "update")
             if n % 4 == 0 and app["clients"]:
                 _broadcast(app, live_state(svc))
         except Exception:  # noqa: BLE001 — keep the daemon alive; the error is printed
@@ -1066,18 +1162,3 @@ async def _service_loop(app):
             traceback.print_exc()
         n += 1
         await asyncio.sleep(0.25)
-
-
-def run(host: str = "127.0.0.1", port: int = 8484) -> None:
-    msg = instance_lock(f"web on port {port}")
-    if msg:
-        raise SystemExit(msg)
-    try:
-        svc = Service()
-        if host not in ("127.0.0.1", "localhost", "::1") and not svc.cfg.web_password_hash:
-            print("⚠  recast web is reachable from your network without a password. Set one in Settings → Security.")
-        print(f"recast web → http://{'localhost' if host in ('0.0.0.0', '::') else host}:{port}   (Ctrl+C to stop)")
-        web.run_app(create_app(svc, host, port), host=host, port=port, print=None)
-    finally:
-        release_lock()
-

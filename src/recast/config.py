@@ -3,6 +3,10 @@
 Each install is standalone: one config.json (library roots, scratch, detected
 encoders, Sonarr/Radarr), a presets/ folder, state.json (jobs + approval inbox)
 and a probe cache. Nothing is shared between machines.
+
+The terminal app and the server are separate installs even on the same machine:
+`recast` keeps its things in .../recast, `recast-server` in .../recast-server
+(or wherever RECAST_HOME points — /config in the Docker image).
 """
 from __future__ import annotations
 
@@ -15,19 +19,39 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 APP = "recast"
+SERVER = "recast-server"
+_profile = APP  # switched to SERVER by `recast-server` before anything is loaded
 
 
-def config_dir() -> Path:
-    if os.environ.get("RECAST_HOME"):
+def use_server_profile() -> None:
+    global _profile
+    _profile = SERVER
+
+
+def is_server() -> bool:
+    return _profile == SERVER
+
+
+def config_dir(profile: str | None = None) -> Path:
+    if os.environ.get("RECAST_HOME") and profile is None:
         return Path(os.environ["RECAST_HOME"]).expanduser()
+    name = profile or _profile
     if sys.platform == "win32":
-        return Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / APP
+        return Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / name
     if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / APP
-    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / APP
+        return Path.home() / "Library" / "Application Support" / name
+    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / name
 
 
 def default_scratch() -> Path:
+    if os.environ.get("RECAST_SCRATCH"):
+        return Path(os.environ["RECAST_SCRATCH"]).expanduser()
+    if _profile == SERVER:  # a cache folder, never somewhere that syncs or gets backed up
+        if sys.platform == "win32":
+            return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / SERVER / "scratch"
+        if sys.platform == "darwin":
+            return Path.home() / "Library" / "Caches" / SERVER
+        return Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / SERVER
     # Deliberately the plain ~/Documents path, not a OneDrive-redirected one:
     # multi-GB temp files should never sync anywhere.
     return Path.home() / "Documents" / APP
@@ -83,10 +107,14 @@ def suggest_libraries(limit: int = 8, mounts: list[str] | None = None) -> list[t
     for m in mounts:
         if not os.path.isdir(m):
             continue
-        subs = [os.path.join(m, n) for n in _ls(m) if n.lower() in MEDIA_NAMES and os.path.isdir(os.path.join(m, n))]
         net = is_network_path(m)
-        for p in subs or ([m] if net else []):
-            out.append((p, net))
+        subs = [os.path.join(m, n) for n in _ls(m) if n.lower() in MEDIA_NAMES and os.path.isdir(os.path.join(m, n))]
+        if not subs and (net or os.path.basename(m.rstrip("/\\")).lower() in MEDIA_NAMES):
+            subs = [m]  # the mount itself is the library (/tv, /movies in a container, or a whole share)
+        for p in subs:
+            inside = lambda a, b: a == b or a.startswith(b.rstrip(os.sep) + os.sep)  # noqa: E731
+            if not any(inside(p, q) or inside(q, p) for q, _ in out):
+                out.append((p, net))
     return out[:limit]
 
 
@@ -98,9 +126,11 @@ def _mount_points() -> list[str]:
     elif sys.platform == "win32":
         mounts = [f"{c}:\\" for c in "DEFGHIJKLMNOPQRSTUVWXYZ" if os.path.isdir(f"{c}:\\")]
     else:
-        mounts = [os.path.join("/mnt", n) for n in _ls("/mnt")] + \
-                 [os.path.join("/media", u, n) for u in _ls("/media") for n in _ls(os.path.join("/media", u))] + \
-                 [os.path.join("/srv", n) for n in _ls("/srv")] + [os.path.expanduser("~/Videos")]
+        # containers (the arr-stack convention: /tv, /movies, /data/media, …) first, then the usual mount spots
+        mounts = [p for p in ("/tv", "/movies", "/anime", "/media", "/data", "/data/media") if os.path.isdir(p)]
+        mounts += [os.path.join("/mnt", n) for n in _ls("/mnt")] + \
+            [os.path.join("/media", u, n) for u in _ls("/media") for n in _ls(os.path.join("/media", u))] + \
+            [os.path.join("/srv", n) for n in _ls("/srv")] + [os.path.expanduser("~/Videos")]
     return mounts
 
 
@@ -154,6 +184,8 @@ class Config:
     prefetch: bool = True
     originals: str = "trash"  # trash | keep | delete
     trash_days: int = 14
+    trash_max_gb: int = 0       # cap on originals held in the trash; oldest days go first (0 = no cap)
+    min_free_gb: int = 50       # automation pauses when the library drive has less free space than this
     rescan_after_replace: bool = True
     verify_decode: bool = True
     rename_codec: bool = True   # "…1080p AV1.mkv" → "…1080p HEVC.mkv" on replace
@@ -161,14 +193,16 @@ class Config:
     desktop_notify: bool = True # OS notification when something needs you
     preview_cadence: float = 1.0
     last_path: str = ""  # where the library tree was; reopened on launch
-    # ── automation (runs in `recast web`) ──
-    auto_mode: str = "off"          # off | dry (show decisions only) | on
+    # ── automation (runs in `recast-server`) ──
+    auto_mode: str = "off"          # off | dry (decisions only) | ask (encode, you approve) | on (fully automatic)
     auto_preset: str = ""           # "" = default preset
     auto_preset_anime: str = ""     # used for series Sonarr marks as anime ("" = same as auto_preset)
     auto_threshold: float = 0.30    # estimated saving ≥ this → encode + replace automatically (if the real saving holds)
     review_threshold: float = 0.10  # between this and auto_threshold → review list; below → skip
     auto_hours: str = ""            # "" = any time, or "01:00-08:00" to only start new work in that window
     sweep_hours: int = 24           # re-list the library for new/changed files this often
+    auto_exclude: list = field(default_factory=list)  # folders automation leaves alone (manual encodes still work)
+    auto_hold_max: int = 10         # ask mode: stop encoding once this many wait for your approval
     webhook_token: str = ""         # for Sonarr/Radarr Connect → Webhook URLs
     # ── web app ──
     web_password_hash: str = ""     # pbkdf2 "salt$hash"; empty = no login (fine on localhost only)

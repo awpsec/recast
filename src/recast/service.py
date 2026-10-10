@@ -1,11 +1,10 @@
 """The UI-independent core: engine, header cache, Sonarr/Radarr, library scanning and automation.
 
-Both front ends use this: the terminal app (`recast`) and the web daemon (`recast web`).
+Both front ends use this: the terminal app (`recast`) and the server (`recast-server`).
 """
 from __future__ import annotations
 
 import os
-import secrets
 import threading
 import time
 from typing import Callable, Iterator
@@ -145,15 +144,20 @@ class LibraryScanner:
             for p, size, mtime in entries:
                 yield root, p, size, mtime, infos.get(p)
 
-    def file_replaced(self, src: str, final: str, size: int) -> None:
-        """A replace renamed/shrank a file: update the listing in place (no relist, no network) and re-rank."""
+    def file_replaced(self, src: str, final: str, size: int, mtime: float | None = None) -> None:
+        """A replace (or restore) renamed/resized a file: update the listing in place (no relist, no network)
+        and re-rank."""
         hit = None
         with self._lock:
             for root, ents in self.entries.items():
                 i = next((i for i, e in enumerate(ents) if e[0] == src), None)
                 if i is not None:
-                    ents[i] = (final, size, time.time())
-                    self.infos.get(root, {}).pop(src, None)
+                    ents[i] = (final, size, time.time() if mtime is None else mtime)
+                    infos = self.infos.setdefault(root, {})
+                    infos.pop(src, None)
+                    m = self.svc.probes.cached_meta(final, size, mtime) if mtime is not None else None
+                    if m:  # a restored original: its header is still cached
+                        infos[final] = m
                     save_snapshot(root, ents, self.snap_when.get(root))  # a restart sees the new name too
                     hit = root
                     break
@@ -172,7 +176,7 @@ class LibraryScanner:
 class Service:
     """Everything recast does, without a UI. Subscribe to engine/automation events with `subscribe`."""
 
-    def __init__(self, cfg: Config | None = None):
+    def __init__(self, cfg: Config | None = None, automation: bool = True):
         self.cfg = cfg or Config.load()
         self.presets = load_presets()
         self.probes = ProbeCache(self.cfg.ffprobe)
@@ -180,16 +184,20 @@ class Service:
         self.engine = Engine(self.cfg, self._emit)
         self.arr: ArrIndex | None = None
         self.scanner = LibraryScanner(self)
-        from .automation import Automation
-        self.automation = Automation(self)
-        if not self.cfg.webhook_token:
-            self.cfg.webhook_token = secrets.token_urlsafe(18)
-            if not self.cfg.needs_setup:
-                self.cfg.save()
+        self.automation = None  # only the server automates; the terminal app is for jobs you start
+        if automation:
+            from .automation import Automation
+            self.automation = Automation(self)
 
     def _on_engine(self, kind: str, obj) -> None:
         if kind == "replaced" and getattr(obj, "final", ""):
             self.scanner.file_replaced(obj.src, obj.final, obj.out_size)
+        elif kind == "restored":
+            try:
+                st = os.stat(obj["src"])
+            except OSError:
+                return
+            self.scanner.file_replaced(obj["final"], obj["src"], st.st_size, st.st_mtime)
 
     def subscribe(self, fn: Callable[[str, object], None]) -> None:
         self._listeners.append(fn)
@@ -237,7 +245,7 @@ def instance_lock(kind: str) -> str | None:
     try:
         pid, other = p.read_text().split(":", 1)
         if int(pid) != os.getpid() and _alive(int(pid)):
-            hint = " — open it in your browser instead" if other.startswith("web") else ""
+            hint = " — open it in your browser instead" if other.startswith(("web", "server")) else ""
             return f"recast is already running on this machine ({other.strip()}, pid {pid}){hint}. Stop it first."
     except (OSError, ValueError):
         pass

@@ -1,6 +1,6 @@
-"""Run the web app (`recast web`) against a throwaway demo library (dev only).
+"""Run recast-server against a throwaway demo library (dev only).
 
-    python scripts/demo_webapp.py [--fresh]   # --fresh shows first-run setup
+    python scripts/demo_server.py [--fresh]   # --fresh shows first-run setup
 """
 import json
 import os
@@ -26,5 +26,6 @@ elif not cfg.exists() and (base / "home" / "config.json").exists():
     home.mkdir(parents=True, exist_ok=True)
     cfg.write_text(json.dumps(c, indent=2))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-from recast.web.server import run  # noqa: E402
-run("127.0.0.1", int(os.environ.get("PORT", 8768)))
+sys.argv = [sys.argv[0], "--port", os.environ.get("PORT", "8768")]
+from recast.server import main  # noqa: E402
+main()

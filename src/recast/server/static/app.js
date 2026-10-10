@@ -1,5 +1,5 @@
 "use strict";
-/* recast web — a small vanilla SPA over /api/*. Everything user-supplied (file names, paths) goes in via
+/* recast-server — a small vanilla SPA over /api/*. Everything user-supplied (file names, paths) goes in via
    textContent, never innerHTML. Live progress arrives over /api/events (server-sent events). */
 
 // ───────────────────────────── helpers ─────────────────────────────
@@ -157,7 +157,9 @@ const RUNNING = ["copying", "ready", "encoding", "paused", "verifying", "to_repl
 const stageBadge = (s) => { const [t, c] = STAGE[s] || [s, ""]; return h("span", { class: "badge " + c }, t); };
 const originBadge = (o) => (o === "auto" ? h("span", { class: "badge outline" }, "auto")
   : o === "review" ? h("span", { class: "badge outline" }, "you said go") : null);
-const MODE = { off: ["Off", ""], dry: ["Dry run", "blue"], on: ["On", "green"] };
+const MODE = { off: ["Off", ""], dry: ["Dry run", "blue"], ask: ["Ask first", "amber"], on: ["Automatic", "green"] };
+const MODES = ["off", "dry", "ask", "on"];
+const shortDate = (t) => new Date(t * 1000).toLocaleDateString([], { month: "short", day: "numeric" });
 
 function codecBar(codecs, size, width = "") {
   const items = Object.entries(codecs || {}).sort((a, b) => b[1] - a[1]);
@@ -195,7 +197,9 @@ function renderShell() {
     h("div", { class: "brand" }, h("div", { class: "brand-mark" }, "r"), h("span", {}, "recast")), nav,
     h("div", { class: "side-foot" },
       h("span", { class: "conn" }, h("i", { class: "dot", id: "conn-dot" }), h("span", { id: "conn-text" }, "connecting…")),
-      h("span", { id: "machine", class: "trunc" })));
+      h("span", { id: "machine", class: "trunc" }),
+      S.info.update ? h("a", { href: "#/settings", class: "blue", style: "font-size:12px;text-decoration:none", title: "docker compose pull && docker compose up -d" }, `↑ v${S.info.update.version} available`)
+        : h("span", { class: "dim", style: "font-size:12px" }, `v${S.info.version || ""}`)));
   const top = h("header", { class: "topbar" },
     h("a", { href: "#/automation", id: "tb-auto", class: "badge", style: "text-decoration:none" }),
     h("span", { id: "tb-auto-status", class: "muted trunc", style: "max-width:340px;font-size:13px" }),
@@ -230,7 +234,7 @@ function updateChrome(live) {
   const a = $("#tb-auto");
   if (a) {
     a.className = "badge " + color;
-    a.textContent = "Automation " + label.toLowerCase();
+    a.textContent = "Automation: " + label.toLowerCase();
     $("#tb-auto-status").textContent = live.automation.mode === "off" ? "" : live.automation.status;
     $("#tb-saved").textContent = fsize(live.saved);
     $("#tb-scratch").textContent = fsize(live.scratch);
@@ -689,9 +693,22 @@ function folderDetails(d) {
     h("div", { style: "margin-top:10px" }, cb.bar, cb.legend),
     r.files ? h("div", { class: "estimate", style: "margin-top:12px" }, h("span", { class: "green" }, `✓ recast re-encoded ${r.files} files here`), ` · ${fsize(r.before)} → ${fsize(r.after)} (−${pct(saving(r.before, r.after))})`) : "",
     d.last_used ? h("div", { class: "dim", style: "margin-top:8px;font-size:12.5px" }, `Last used here: ${d.last_used.preset}`) : "",
+    excludeRow(d),
     h("h3", { style: "margin:16px 0 4px" }, "What each preset would do"),
     gainsTable(d, true, d.files),
   ];
+}
+
+function excludeRow(d) {
+  if (d.excluded && !d.excluded_here) return h("div", { class: "dim", style: "margin-top:10px;font-size:12.5px" }, "Automation leaves this alone (a parent folder is excluded).");
+  const box = h("label", { class: "check", style: "margin-top:12px" });
+  const cb = h("input", { type: "checkbox", checked: !!d.excluded_here, onchange: async (e) => {
+    const on = e.target.checked;
+    const r = await act(() => post("/api/automation/exclude", { path: d.path, on }), on ? "Automation will leave it alone" : "Back in automation");
+    if (!r) e.target.checked = !on;
+  } });
+  box.append(cb, "Leave this out of automation", h("span", { class: "dim", style: "font-size:12px;margin-left:6px" }, "manual encodes still work"));
+  return box;
 }
 
 function fileDetails(d, box, pg) {
@@ -707,17 +724,19 @@ function fileDetails(d, box, pg) {
       h("span", {}, "Size"), h("span", { class: "num" }, fsize(m.size)),
       h("span", {}, "Audio"), h("span", {}, m.audio.join(", ") || "none"),
       h("span", {}, "Subtitles"), h("span", { class: "trunc" }, m.subs.join(", ") || "none")),
+    d.excluded ? h("div", { class: "dim", style: "margin-top:10px;font-size:12.5px" }, "Automation leaves this folder alone.") : "",
   ];
   if (d.history) {
     const hh = d.history;
     out.push(h("div", { class: "estimate", style: "margin-top:14px" },
       h("div", {}, h("span", { class: "green" }, "✓ Re-encoded by recast"), ` with ${hh.preset}, ${ago(hh.when)}`),
       h("div", { class: "num muted", style: "margin-top:2px" }, `${fsize(hh.src_size)} → ${fsize(hh.out_size)} (−${pct(saving(hh.src_size, hh.out_size))})`),
+      h("div", { class: "dim", style: "font-size:12px;margin-top:4px" }, originalWhere(hh)),
       hh.can_restore ? h("button", { class: "btn sm", style: "margin-top:8px", onclick: async () => {
-        if (!(await confirmBox("Put the original back?", "The original returns to its place and the re-encode moves to recast's trash.", "Restore original"))) return;
+        if (!(await confirmBox("Put the original back?", "The original returns to its place and the re-encode moves to recast's trash. Nothing is copied — it's a rename on the share, so it's instant.", "Restore original"))) return;
         const r = await act(() => post("/api/history/restore", { path: d.path }));
         if (r) { toast(r.message, "green"); history.back(); }
-      } }, "Restore original") : h("div", { class: "dim", style: "font-size:12px;margin-top:4px" }, "The original is no longer in the trash.")));
+      } }, "Restore original") : ""));
   }
   if (d.review) {
     out.push(h("div", { class: "estimate", style: "margin-top:14px" },
@@ -1022,19 +1041,22 @@ PAGES.automation = async (pg) => {
   const modeHelp = {
     off: "Nothing happens on its own. You encode from the Library.",
     dry: "Decides what it would do and shows it here, but encodes nothing. Good for checking your thresholds first.",
+    ask: "Encodes clear wins one at a time, then each one waits in the Inbox for your OK before it replaces anything.",
     on: "Encodes clear wins one at a time and replaces them by itself; borderline files wait in Review.",
   };
   const seg = h("div", { class: "seg" });
   const help = h("div", { class: "mode-help" });
   const statusLine = h("span", {}, d.status);
   const drawMode = () => {
-    seg.replaceChildren(...["off", "dry", "on"].map((m) => h("button", { class: (s.auto_mode === m ? "on " + MODE[m][1] : ""), onclick: async () => {
+    seg.replaceChildren(...MODES.map((m) => h("button", { class: (s.auto_mode === m ? "on " + MODE[m][1] : ""), onclick: async () => {
       if (m === "on" && s.auto_mode !== "on" && !(await confirmBox("Turn on automation?",
         `recast will encode files whose estimated saving is at least ${pct(s.auto_threshold)} with ${s.auto_preset || d.default_preset}, one at a time, and replace each original once the real result also clears that bar and passes every check. Originals go to recast's trash first.`, "Turn on", "go"))) return;
-      if (await save({ auto_mode: m })) drawMode();
+      if (await save({ auto_mode: m })) { drawMode(); refreshPreview(); }
     } }, MODE[m][0])));
     help.textContent = modeHelp[s.auto_mode];
+    modeDot.className = "dot " + (s.auto_mode === "on" ? "green pulse" : s.auto_mode === "ask" ? "amber pulse" : "");
   };
+  const modeDot = h("i", { class: "dot" });
   drawMode();
 
   // presets
@@ -1064,7 +1086,7 @@ PAGES.automation = async (pg) => {
       h("div", { class: "stackbar", style: "margin:14px 0 8px;height:10px" },
         h("i", { style: `width:${(p.auto / total) * 100}%;background:var(--green)` }), h("i", { style: `width:${(p.review / total) * 100}%;background:var(--amber)` }),
         h("i", { style: `width:${(p.skip / total) * 100}%;background:var(--shade-4)` })),
-      h("div", { class: "outcome" }, h("i", { style: "background:var(--green)" }), h("span", {}, h("b", {}, num(p.auto)), " files encode and replace on their own"), h("span", { class: "num green" }, "frees ~" + fsize(p.auto_bytes))),
+      h("div", { class: "outcome" }, h("i", { style: "background:var(--green)" }), h("span", {}, h("b", {}, num(p.auto)), s.auto_mode === "ask" ? " files encode, then wait for your OK" : " files encode and replace on their own"), h("span", { class: "num green" }, "frees ~" + fsize(p.auto_bytes))),
       h("div", { class: "outcome" }, h("i", { style: "background:var(--amber)" }), h("span", {}, h("b", {}, num(p.review)), " wait for you in Review"), h("span", { class: "num amber" }, "~" + fsize(p.review_bytes))),
       h("div", { class: "outcome" }, h("i", { style: "background:var(--shade-4)" }), h("span", {}, h("b", {}, num(p.skip)), " skipped — already efficient or not worth it"), h("span", {})));
   }, 200);
@@ -1082,6 +1104,15 @@ PAGES.automation = async (pg) => {
   const saveHours = () => save({ auto_hours: hoursOn.checked ? `${from.value || "01:00"}-${to.value || "08:00"}` : "" });
   [hoursOn, from, to].forEach((x) => x.addEventListener("change", saveHours));
   const sweepN = h("input", { type: "number", min: 1, value: s.sweep_hours, onchange: (e) => save({ sweep_hours: Number(e.target.value) || 24 }) });
+  const holdN = h("input", { type: "number", min: 1, value: s.auto_hold_max, onchange: (e) => save({ auto_hold_max: Number(e.target.value) || 10 }) });
+  const exclBox = h("div", { class: "list", style: "margin-top:8px" });
+  const drawExcl = (list) => exclBox.replaceChildren(...(list.length ? list.map((x) => h("div", { class: "item" },
+    h("div", { class: "grow" }, h("div", { class: "trunc", title: x }, base(x)), h("div", { class: "dim trunc", style: "font-size:12px" }, x)),
+    h("button", { class: "btn sm ghost", onclick: async () => {
+      const r = await act(() => post("/api/automation/exclude", { path: x, on: false }), `${base(x)} is back in automation`);
+      if (r) { d.excluded = r.excluded; drawExcl(r.excluded); refreshPreview(); }
+    } }, "Include again"))) : [h("div", { class: "empty" }, "Nothing excluded.")]));
+  drawExcl(d.excluded);
   const sweepBtn = h("button", { class: "btn sm", onclick: async () => { if (await act(() => post("/api/automation/sweep"))) toast("Sweeping — re-listing folders; only new or changed files are read.", "", 5000); } }, "Sweep now");
 
   // hooks
@@ -1108,7 +1139,7 @@ PAGES.automation = async (pg) => {
   pg.el.append(pageHead("Automation", "Keeps the library optimized on its own — one file at a time, so the NAS and your scratch disk never get flooded."),
     h("div", { class: "grid cols-main" },
       h("div", { class: "stack" },
-        card(null, h("div", { class: "row wrap" }, seg, h("span", { class: "row", style: "gap:6px;font-size:13px" }, h("i", { class: "dot " + (s.auto_mode === "on" ? "green pulse" : "") }), statusLine)), help),
+        card(null, h("div", { class: "row wrap" }, seg, h("span", { class: "row", style: "gap:6px;font-size:13px" }, modeDot, statusLine)), help),
         card("What gets encoded",
           fieldRow("Preferred preset", "used for everything", prefSel),
           fieldRow("Anime preset", d.arr.sonarr ? "for series Sonarr marks as anime" : "needs Sonarr connected (Settings)", animeSel),
@@ -1125,7 +1156,11 @@ PAGES.automation = async (pg) => {
         card("Pacing",
           fieldRow("Copy ahead", "copy the next file while the current one encodes — at most one waiting", h("label", { class: "check" }, prefetch, "on")),
           fieldRow("Working hours", "only start new files in this window", h("label", { class: "check" }, hoursOn, "only between"), from, "and", to),
-          fieldRow("Look for new files", "re-lists folders (cheap); only new or changed files are read", "every", sweepN, "hours", sweepBtn, lastSweep)),
+          fieldRow("Look for new files", "re-lists folders (cheap); only new or changed files are read", "every", sweepN, "hours", sweepBtn, lastSweep),
+          fieldRow("Waiting for your OK", "stop encoding when this many automatic encodes wait in the Inbox", "at most", holdN)),
+        card(h("div", { class: "card-head" }, h("h2", {}, "Left alone"), h("span", { class: "muted num" }, d.excluded.length ? num(d.excluded.length) : "")),
+          h("p", { class: "muted", style: "margin:8px 0 0" }, "Shows or folders automation never touches. Exclude one from its details in the ", h("a", { href: "#/library" }, "Library"), " — encoding it by hand still works."),
+          exclBox),
         card("Sonarr & Radarr",
           h("p", { class: "muted", style: "margin:8px 0 0" }, "Point a webhook at recast and new downloads are looked at ~90 s after import, ahead of everything else."),
           copyRow("Sonarr webhook URL", d.hooks.sonarr), copyRow("Radarr webhook URL", d.hooks.radarr),
@@ -1242,30 +1277,43 @@ PAGES.presets = async (pg) => {
 };
 
 // ───────────────────────────── history ─────────────────────────────
+function originalWhere(x, short) {
+  switch (x.original) {
+    case "trash": return short ? `in trash until ${shortDate(x.kept_until)}` : `Original is in recast's trash until ${shortDate(x.kept_until)} — restoring is a rename, instant.`;
+    case "kept": return short ? "kept as .orig" : "Original is kept next to it (.orig).";
+    case "purged": return short ? `purged ${shortDate(x.purged)}` : `Original was purged from the trash on ${shortDate(x.purged)}.`;
+    case "deleted": return short ? "deleted" : "Original was deleted when replaced.";
+    case "restored": return short ? "restored" : "The original was put back.";
+    default: return short ? "gone" : "The original is no longer where recast left it.";
+  }
+}
 PAGES.history = async (pg) => {
   const d = await api("/api/history");
   if (!pg.alive) return;
   const live = d.history.filter((x) => !x.restored);
-  const saved = live.reduce((a, x) => a + (x.src_size - x.out_size), 0);
+  const saved = d.saved;
   let q = "";
   const box = h("div");
   const draw = () => {
     const rows = d.history.filter((x) => !q || (x.final || x.src).toLowerCase().includes(q)).slice(0, 500);
     box.replaceChildren(rows.length ? h("div", { class: "table-wrap" }, h("table", { class: "table" },
-      h("thead", {}, h("tr", {}, h("th", {}, "File"), h("th", { class: "hide-sm" }, "Preset"), h("th", { class: "num" }, "Before → after"), h("th", { class: "num" }, "Saved"), h("th", { class: "hide-sm" }, "When"), h("th", {}))),
+      h("thead", {}, h("tr", {}, h("th", {}, "File"), h("th", { class: "hide-sm" }, "Preset"), h("th", { class: "num" }, "Before → after"), h("th", { class: "num" }, "Saved"), h("th", { class: "hide-sm" }, "When"), h("th", { class: "hide-sm" }, "Original"), h("th", {}))),
       h("tbody", {}, rows.map((x) => h("tr", {},
         h("td", { class: "name" }, h("div", { class: "trunc", title: x.final }, base(x.final || x.src)), h("div", { class: "sub trunc" }, parentName(x.final || x.src))),
         h("td", { class: "hide-sm muted trunc", style: "max-width:200px" }, x.preset),
         h("td", { class: "num nowrap" }, `${fsize(x.src_size)} → ${fsize(x.out_size)}`),
         h("td", { class: "num" }, x.restored ? h("span", { class: "dim" }, "—") : h("span", { class: "green" }, "−" + pct(saving(x.src_size, x.out_size)))),
         h("td", { class: "hide-sm dim nowrap" }, ago(x.when)),
+        h("td", { class: "hide-sm dim nowrap", style: "font-size:12.5px" }, originalWhere(x, true)),
         h("td", { class: "right" }, x.restored ? h("span", { class: "badge" }, "restored") : x.can_restore ? h("button", { class: "btn sm ghost", onclick: async () => {
           if (!(await confirmBox("Put the original back?", `${base(x.final)} — the original returns and the re-encode moves to recast's trash.`, "Restore original"))) return;
           const r = await act(() => post("/api/history/restore", { path: x.final }));
           if (r) { toast(r.message, "green"); route(); }
         } }, "Restore") : "")))))) : h("div", { class: "empty" }, d.history.length ? "No matches." : "Nothing replaced yet."));
   };
-  pg.el.append(pageHead("History", `${num(live.length)} file${live.length === 1 ? "" : "s"} re-encoded · ${fsize(saved)} saved. Originals stay in recast's trash for a while so you can undo.`,
+  const keep = d.originals === "trash" ? `Originals wait in recast's trash for ${d.trash_days} days${d.trash_max_gb ? ` (at most ${d.trash_max_gb} GB)` : ""} so you can undo — ${fsize(d.trash_bytes)} there now; that space comes back when they're purged.`
+    : d.originals === "keep" ? "Originals are kept next to the new files (.orig) until you delete them." : "Originals are deleted when replaced — nothing to undo.";
+  pg.el.append(pageHead("History", `${num(live.length)} file${live.length === 1 ? "" : "s"} re-encoded · ${fsize(saved)} saved. ${keep}`,
     h("input", { type: "search", placeholder: "Filter…", oninput: debounce((e) => { q = e.target.value.toLowerCase(); draw(); }, 120) })), card(null, box));
   draw();
 };
@@ -1362,7 +1410,9 @@ PAGES.settings = async (pg) => {
         fieldRow("Originals", "what happens to the file being replaced",
           h("select", { onchange: (e) => saveKey("originals", e.target.value) },
             [["trash", "Move to recast's trash (undo possible)"], ["keep", "Keep next to the new file (.orig)"], ["delete", "Delete"]].map(([v, l]) => h("option", { value: v, selected: st.originals === v }, l)))),
-        fieldRow("Empty the trash after", null, h("input", { type: "number", min: 1, value: st.trash_days, onchange: (e) => saveKey("trash_days", Number(e.target.value)) }), "days"),
+        fieldRow("Empty the trash after", "originals stay on the share until then — that's what makes restore instant", h("input", { type: "number", min: 1, value: st.trash_days, onchange: (e) => saveKey("trash_days", Number(e.target.value)) }), "days"),
+        fieldRow("Trash size limit", "purge the oldest days early when the trash holds more than this (0 = no limit)", h("input", { type: "number", min: 0, value: st.trash_max_gb, onchange: (e) => saveKey("trash_max_gb", Number(e.target.value)) }), "GB"),
+        fieldRow("Keep free on the library drive", "automation pauses below this — replaced originals use space until they're purged", h("input", { type: "number", min: 0, value: st.min_free_gb, onchange: (e) => saveKey("min_free_gb", Number(e.target.value)) }), "GB"),
         fieldRow("Decode test", "decode the whole output once before it can replace anything", chk("verify_decode")),
         fieldRow("Rename codec in file names", "“… AV1.mkv” → “… HEVC.mkv”", chk("rename_codec")),
         fieldRow("Rescan Sonarr/Radarr after replacing", null, chk("rescan_after_replace")),
@@ -1378,7 +1428,10 @@ PAGES.settings = async (pg) => {
           h("span", {}, "Computer"), h("span", {}, [d.machine.host, d.machine.os].filter(Boolean).join(" · ")),
           h("span", {}, "CPU / GPU"), h("span", {}, [d.machine.cpu, d.machine.gpu].filter(Boolean).join(" · ")),
           h("span", {}, "ffmpeg"), h("span", { class: "mono" }, `${d.ffmpeg_version} · ${d.ffmpeg}`),
-          h("span", {}, "Detected"), h("span", {}, d.detected_at || "—")),
+          h("span", {}, "Detected"), h("span", {}, d.detected_at || "—"),
+          h("span", {}, "recast"), h("span", {}, `v${S.info.version}`, S.info.update ? h("span", { class: "blue" }, " · ", h("a", { href: S.info.update.url, target: "_blank", rel: "noopener" }, `v${S.info.update.version} is out`)) : " · up to date")),
+        S.info.update ? h("div", { class: "estimate", style: "margin-top:10px" }, "To update, on the server: ", h("code", {}, "docker compose pull && docker compose up -d"),
+          h("div", { class: "dim", style: "font-size:12px;margin-top:4px" }, "Settings, queue and history live in /config and carry over.")) : "",
         h("div", { class: "table-wrap", style: "margin-top:12px" }, h("table", { class: "table" }, h("tbody", {}, encRows.map(([n, c]) => h("tr", {},
           h("td", { class: "mono" }, n), h("td", {}, c.status === "ok" ? h("span", { class: "green" }, "✓ works") : h("span", { class: c.status === "failed" ? "red" : "dim" }, "✗ " + (c.reason || c.status))),
           h("td", { class: "num muted" }, c.fps ? `~${Math.round(c.fps)} fps @1080p` : "")))))),

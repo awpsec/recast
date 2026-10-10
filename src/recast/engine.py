@@ -29,6 +29,7 @@ ACTIVE = ("queued", "copying", "ready", "encoding", "paused", "verifying")
 LIVE = ("encoding", "paused", "verifying")
 DONE = ("awaiting", "to_replace", "replacing", "replaced", "kept")
 FINAL = ("replaced", "kept", "discarded", "cancelled", "skipped", "failed")
+ASK_FIRST = 2.0  # auto_min_saving for automation in "ask" mode: no saving clears it, so you always approve
 
 
 class Cancelled(Exception):
@@ -266,27 +267,59 @@ class Engine:
             h["orig"] = _find_original(h["src"]) or h.get("orig", "")
         return h
 
+    def can_restore(self, h: dict) -> bool:
+        return bool(not h.get("restored") and not h.get("purged") and h.get("orig") and os.path.exists(h["orig"]))
+
+    def kept_until(self, h: dict) -> float:
+        """When the trash purge will delete this original (0 = not in the trash: kept as .orig or deleted)."""
+        day = _trash_day(h.get("orig", ""))
+        return day + self.cfg.trash_days * 86400 if day else 0.0
+
     def restore(self, path: str) -> str:
-        """Undo a replace: the original goes back, the re-encode is set aside in the trash. Blocking."""
+        """Undo a replace: the original goes back under its old name, the re-encode is set aside in the trash.
+        Pure renames on the same share — nothing is copied. Blocking."""
         h = self.record_for(path)
         if not h:
             raise NotReplaced("recast didn't produce this file")
         orig = h.get("orig", "")
+        if h.get("purged") and not (orig and os.path.exists(orig)):
+            raise NotReplaced("the original was purged from the trash on "
+                              + time.strftime("%Y-%m-%d", time.localtime(h["purged"])))
         if not orig or not os.path.exists(orig):
             raise NotReplaced("the original is no longer in the trash (purged or deleted)")
         final, src = h["final"], h["src"]
+        try:
+            st = os.stat(final)
+        except FileNotFoundError:
+            raise NotReplaced(f"{os.path.basename(final)} is gone from the library (moved or deleted since?)")
+        if h.get("out_size") and st.st_size != h["out_size"]:
+            raise NotReplaced(f"{os.path.basename(final)} changed since recast replaced it (upgraded by "
+                              "Sonarr/Radarr?) — restoring would throw that file away")
         if norm(src) != norm(final) and os.path.exists(src):
             raise NotReplaced(f"{os.path.basename(src)} exists again (re-downloaded?)")
-        aside = orig + ".recast-undone" + os.path.splitext(final)[1]
+        root = next((r.path for r in self.cfg.roots if norm(src).startswith(norm(r.path) + os.sep)), "")
+        if root:
+            aside_dir = _trash_dir(root, os.path.dirname(src))
+        elif ".recast-trash" in orig:
+            aside_dir = os.path.dirname(orig)
+        else:
+            raise NotReplaced("this file isn't inside a library folder any more")
+        stem, ext = os.path.splitext(os.path.basename(final))
+        aside = os.path.join(aside_dir, f"{stem}.recast-undone{ext}")
+        n = 1
+        while os.path.exists(aside):
+            n += 1
+            aside = os.path.join(aside_dir, f"{stem}.recast-undone-{n}{ext}")
         os.replace(final, aside)  # same share: renames, no copying
         try:
             os.replace(orig, src)
         except OSError:
             os.replace(aside, final)
             raise
-        h["restored"] = time.time()
+        h["restored"], h["undone"] = time.time(), aside
         self.touch()
         self.save(force=True)
+        self.on_event("restored", h)
         return f"restored {os.path.basename(src)} · the re-encode was moved to the trash"
 
     def measured(self, folder: str) -> dict[str, tuple[float, int]]:
@@ -667,7 +700,9 @@ class Engine:
                 j.stage = "to_replace"
             else:
                 j.stage, j.waiting_since = "awaiting", time.time()
-                if not j.flag:
+                if not j.flag and j.auto_min_saving >= ASK_FIRST:
+                    j.note = f"saved {actual * 100:.0f}% — automation is set to ask before replacing"
+                elif not j.flag:
                     j.note = (f"saved {actual * 100:.0f}% — below the {j.auto_min_saving * 100:.0f}% you set for "
                               "replacing automatically")
             self.touch()
@@ -785,14 +820,7 @@ class Engine:
         moved_to = ""
         mode = self.cfg.originals
         if mode == "trash":
-            rel = os.path.relpath(d, j.root_path)
-            trash_root = os.path.join(j.root_path, ".recast-trash")
-            trash_dir = os.path.join(trash_root, time.strftime("%Y-%m-%d"), rel)
-            os.makedirs(trash_dir, exist_ok=True)
-            ignore = os.path.join(trash_root, ".plexignore")
-            if not os.path.exists(ignore):  # keep Plex from ever indexing the trash
-                with open(ignore, "w") as fh:
-                    fh.write("*\n")
+            trash_dir = _trash_dir(j.root_path, d)
             moved_to = os.path.join(trash_dir, os.path.basename(src))
             os.replace(src, moved_to)
         elif mode == "keep":
@@ -931,10 +959,9 @@ class Engine:
                         pass
         return freed
 
-    def purge_trash(self) -> list[str]:
-        """Delete .recast-trash/<date> folders older than trash_days. Only touches folders recast created."""
-        removed = []
-        cutoff = time.time() - self.cfg.trash_days * 86400
+    def trash_folders(self) -> list[tuple[float, str, int]]:
+        """[(day, folder, bytes)] for every .recast-trash/<date> folder, oldest first. Walks only the trash."""
+        out = []
         for r in self.cfg.roots:
             t = os.path.join(r.path, ".recast-trash")
             try:
@@ -942,14 +969,39 @@ class Engine:
             except OSError:
                 continue
             for e in entries:
-                try:
-                    day = time.mktime(time.strptime(e.name, "%Y-%m-%d"))
-                except ValueError:
-                    continue
-                if e.is_dir() and day < cutoff:
-                    shutil.rmtree(e.path, ignore_errors=True)
-                    removed.append(e.path)
+                day = _trash_day(os.path.join(e.path, "x"))
+                if day and e.is_dir():
+                    out.append((day, e.path, _tree_size(e.path)))
+        return sorted(out)
+
+    def purge_trash(self) -> list[str]:
+        """Delete .recast-trash/<date> folders older than trash_days — and, if trash_max_gb is set, the oldest
+        ones beyond it (never today's). Only touches folders recast created. History remembers what went."""
+        removed = []
+        cutoff = time.time() - self.cfg.trash_days * 86400
+        days = self.trash_folders()
+        total = sum(d[2] for d in days)
+        cap = self.cfg.trash_max_gb * 1024**3 if self.cfg.trash_max_gb > 0 else 0
+        today = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+        for day, folder, size in days:
+            if day < cutoff or (cap and total > cap and day < today):
+                shutil.rmtree(folder, ignore_errors=True)
+                if not os.path.exists(folder):
+                    removed.append(folder)
+                    total -= size
+        if removed:
+            now, gone = time.time(), [norm(f) + os.sep for f in removed]
+            for h in self.history:
+                if h.get("orig") and not h.get("purged") and any(norm(h["orig"]).startswith(g) for g in gone):
+                    h["purged"] = now
+            self.touch()
+            self.save(force=True)
         return removed
+
+    def trash_bytes(self) -> int:
+        """Originals recast is still holding in the trash (from its own records — no disk walk)."""
+        return sum(h.get("src_size", 0) for h in self.history
+                   if not h.get("restored") and not h.get("purged") and _trash_day(h.get("orig", "")))
 
 
 def _find_original(src: str) -> str:
@@ -970,6 +1022,43 @@ def _find_original(src: str) -> str:
             break
         a = parent
     return ""
+
+
+def _trash_dir(root: str, folder: str) -> str:
+    """<root>/.recast-trash/<today>/<folder relative to root>, created, with a .plexignore at the top."""
+    trash_root = os.path.join(root, ".recast-trash")
+    d = os.path.join(trash_root, time.strftime("%Y-%m-%d"), os.path.relpath(folder, root))
+    os.makedirs(d, exist_ok=True)
+    ignore = os.path.join(trash_root, ".plexignore")
+    if not os.path.exists(ignore):  # keep Plex from ever indexing the trash
+        with open(ignore, "w") as fh:
+            fh.write("*\n")
+    return d
+
+
+TRASH_DAY_RX = re.compile(r"[\\/]\.recast-trash[\\/](\d{4}-\d{2}-\d{2})[\\/]")
+
+
+def _trash_day(path: str) -> float:
+    """The day folder an original sits in (as a timestamp), or 0 if it isn't in a recast trash."""
+    m = TRASH_DAY_RX.search(path or "")
+    if not m:
+        return 0.0
+    try:
+        return time.mktime(time.strptime(m.group(1), "%Y-%m-%d"))
+    except ValueError:
+        return 0.0
+
+
+def _tree_size(path: str) -> int:
+    total = 0
+    for dirpath, _dirs, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(dirpath, f)).st_size
+            except OSError:
+                pass
+    return total
 
 
 def _rm_glob(folder: str, prefix: str) -> None:

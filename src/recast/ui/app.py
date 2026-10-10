@@ -159,7 +159,7 @@ class RecastApp(App):
     def __init__(self):
         super().__init__()
         self.cfg = Config.load()
-        self.svc = Service(self.cfg)            # engine, header cache, scanner, Sonarr/Radarr — shared with `recast web`
+        self.svc = Service(self.cfg, automation=False)  # engine, header cache, scanner, Sonarr/Radarr
         self.engine = self.svc.engine
         self.scanner = self.svc.scanner
         self.svc.subscribe(self.on_engine_event)
@@ -358,6 +358,18 @@ class RecastApp(App):
             self.push_screen(SetupScreen(self.cfg, first_run=True), self.after_setup)
         else:
             self.start()
+        self.check_for_update()
+
+    @work(thread=True, group="update", exclusive=True)
+    def check_for_update(self) -> None:
+        """Once a day at most: is there a newer release? (Never installs anything by itself.)"""
+        if os.environ.get("RECAST_NO_UPDATE_CHECK"):
+            return
+        from ..update import check
+        rel = check()
+        if rel:
+            self.call_from_thread(self.notify, f"recast {rel['version']} is out — quit and run `recast update`.",
+                                  title="Update available", timeout=12)
 
     def _save_cfg_if_moved(self) -> None:
         if self.cfg.last_path != getattr(self, "_saved_last_path", None):

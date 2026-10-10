@@ -36,6 +36,7 @@ class MediaInfo:
     interlaced: bool = False
     audio: list = field(default_factory=list)  # dicts: lang codec channels layout kbps title default
     subs: list = field(default_factory=list)   # dicts: lang codec forced title
+    recast: str = ""  # the RECAST tag recast writes into its own outputs (any install, any machine)
     error: str = ""
 
     @property
@@ -80,6 +81,7 @@ def parse(path: str, data: dict) -> MediaInfo:
     streams = data.get("streams", [])
     m = MediaInfo(path=path, size=int(fmt.get("size", 0) or 0), duration=float(fmt.get("duration", 0) or 0),
                   container=fmt.get("format_name", ""))
+    m.recast = next((v for k, v in (fmt.get("tags") or {}).items() if k.upper() == "RECAST"), "")
     video = [s for s in streams if s.get("codec_type") == "video"
              and not (s.get("disposition") or {}).get("attached_pic")]
     if video:

@@ -1,0 +1,42 @@
+# recast-server — the always-on half of recast, next to your Sonarr/Radarr.
+#
+#   mkdir -p ~/recast && cd ~/recast
+#   curl -fsSLO https://raw.githubusercontent.com/awpsec/recast/main/compose.yaml
+#   curl -fsSL https://raw.githubusercontent.com/awpsec/recast/main/.env.example -o .env
+#   nano .env                      # library paths, PUID/PGID, timezone
+#   docker compose up -d           # → http://<this server>:8484
+#
+# Update:  docker compose pull && docker compose up -d
+# (settings, queue and history live in CONFIG_DIR and carry over; the web app says when a release is out)
+#
+# Nothing is encoded until you say so: automation starts Off. Every replaced original waits in
+# <library>/.recast-trash for 14 days, so any file can be restored.
+
+services:
+  recast:
+    image: ghcr.io/awpsec/recast:${RECAST_TAG:-latest}
+    container_name: recast
+    hostname: ${RECAST_HOSTNAME:-recast}
+    restart: unless-stopped
+    ports:
+      - "${RECAST_PORT:-8484}:8484"
+    environment:
+      PUID: ${PUID:-1000}               # same user/group as Sonarr/Radarr, so replaced files keep their owner
+      PGID: ${PGID:-1000}
+      UMASK: ${UMASK:-002}
+      TZ: ${TZ:-Etc/UTC}                # working hours ("only 01:00–08:00") use this
+      RECAST_LIBRARIES: /tv,/movies     # first start only; change folders in Settings afterwards
+      RECAST_SONARR_URL: ${SONARR_URL:-}
+      RECAST_SONARR_API_KEY: ${SONARR_API_KEY:-}
+      RECAST_RADARR_URL: ${RADARR_URL:-}
+      RECAST_RADARR_API_KEY: ${RADARR_API_KEY:-}
+    volumes:
+      - ${CONFIG_DIR:-./config}:/config
+      - ${SCRATCH_DIR:-./scratch}:/scratch    # a fast local disk; copies + encodes happen here
+      - ${TV_DIR:?set TV_DIR in .env}:/tv
+      - ${MOVIES_DIR:?set MOVIES_DIR in .env}:/movies
+    devices:
+      - /dev/dri:/dev/dri               # Intel/AMD GPU for QSV/VAAPI. Delete these two lines if the server has none.
+    # NVIDIA instead: delete the two `devices` lines, install nvidia-container-toolkit on the host, uncomment
+    # the next line, and add  NVIDIA_VISIBLE_DEVICES: all  and  NVIDIA_DRIVER_CAPABILITIES: all  under environment.
+    # runtime: nvidia

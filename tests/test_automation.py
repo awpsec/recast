@@ -189,3 +189,68 @@ def test_quality_loss_is_never_automatic(svc):
     assert not svc.automation.queue and len(svc.automation.review) == 5   # huge saving, still your call
     assert {p["reason"] for p in svc.automation.review.values()} == {"would downscale 720p → 480p"}
     assert svc.automation.skip_many("would downscale 720p → 480p") == 5 and not svc.automation.review
+
+
+async def test_ask_mode_encodes_but_never_replaces_and_stops_at_the_hold_limit(svc):
+    svc.cfg.auto_mode, svc.cfg.auto_hold_max, svc.cfg.prefetch = "ask", 2, False
+    svc.automation.rebuild()
+    await drive(svc, lambda: sum(j.stage == "awaiting" for j in svc.engine.jobs.values()) == 2)
+    for _ in range(20):
+        svc.engine.tick()
+        svc.automation.tick()
+    held = [j for j in svc.engine.jobs.values() if j.origin == "auto"]
+    assert len(held) == 2 and all(j.stage == "awaiting" for j in held)       # nothing replaced on its own
+    assert all("ask before replacing" in j.note for j in held) and not svc.engine.history
+    assert svc.automation.status.startswith("paused — 2 encodes are waiting")
+    assert all(Path(j.src).exists() for j in held)
+
+
+def test_excluded_folders_are_left_alone(svc):
+    show = str(Path(svc.cfg.roots[0].path) / "TV" / "Fat Show")
+    svc.automation.rebuild()
+    assert svc.automation.counts["auto"] == 5
+    svc.automation.set_excluded(show, True)
+    assert svc.automation.counts["auto"] == 0 and svc.automation.counts["excluded"] == 5
+    assert svc.automation.preview(0.3, 0.1)["auto"] == 0
+    svc.automation.tick()
+    assert not svc.engine.jobs
+    svc.automation.set_excluded(show, False)
+    assert svc.automation.counts["auto"] == 5 and not svc.cfg.auto_exclude
+
+
+def test_pauses_when_the_library_drive_is_nearly_full(svc, monkeypatch):
+    svc.automation.rebuild()
+    monkeypatch.setattr(svc.automation, "library_free", lambda path: 10 * 1024**3)
+    svc.cfg.min_free_gb = 50
+    svc.automation.tick()
+    assert not svc.engine.jobs and "10 GB free" in svc.automation.status
+    svc.cfg.min_free_gb = 0
+    svc.automation.tick()
+    assert svc.engine.jobs
+
+
+async def test_restored_files_are_not_redone(svc):
+    svc.cfg.prefetch = False
+    svc.automation.rebuild()
+    svc.automation.queue = svc.automation.queue[:1]
+    await drive(svc, lambda: len(svc.engine.history) == 1)
+    h = svc.engine.history[0]
+    svc.engine.restore(h["final"])
+    assert svc.automation.skipped[h["src"]]["reason"] == "you restored the original"
+    counts = svc.automation.rebuild()
+    assert h["src"] not in {p["path"] for p in svc.automation.queue} and counts["auto"] == 4
+    assert any(e[0] == h["src"] for e in svc.scanner.entries[svc.cfg.roots[0].path])   # back in the listing
+
+
+async def test_recast_outputs_are_tagged_and_never_redone(svc, home, tmp_path):
+    """A file the terminal app (or another machine) already re-encoded: the server leaves it alone."""
+    svc.cfg.prefetch = False
+    svc.automation.rebuild()
+    svc.automation.queue = svc.automation.queue[:1]
+    await drive(svc, lambda: len(svc.engine.history) == 1)
+    final = svc.engine.history[0]["final"]
+    m = svc.probes.get(final)
+    assert m.recast                                       # RECAST tag in the file itself
+    svc.engine.history.clear()                            # a different install has no record of it
+    p = svc.automation.evaluate(m)
+    assert p["verdict"] == "skip" and p["reason"] == "already re-encoded by recast"

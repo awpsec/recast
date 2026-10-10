@@ -1,6 +1,7 @@
 """End-to-end: real ffmpeg encodes against the generated library."""
 import asyncio
 import os
+import sys
 from pathlib import Path
 
 from recast.config import Config, EncoderCap, Root
@@ -8,8 +9,10 @@ from recast.encode import EncodeSettings, already_target
 from recast.engine import Engine
 from recast.probe import probe_now
 
-CAPS = {"libx265": EncoderCap("ok", 60), "hevc_videotoolbox": EncoderCap("ok", 300),
-        "libx264": EncoderCap("ok", 150)}
+CAPS = {"libx265": EncoderCap("ok", 60), "libx264": EncoderCap("ok", 150)}
+HW = "hevc_videotoolbox" if sys.platform == "darwin" else "libx265"  # the encoder "auto" should land on
+if sys.platform == "darwin":
+    CAPS["hevc_videotoolbox"] = EncoderCap("ok", 300)
 
 
 def make(home, library, tmp_path, **kw):
@@ -45,7 +48,7 @@ async def test_preview_encode_approve_replace(home, library, tmp_path):
                                 "-of", "json", j.out], capture_output=True, text=True).stdout)["streams"][0]["tags"]
     assert "BPS" not in tags and "NUMBER_OF_BYTES" not in tags and tags.get("language") == "eng", tags
     assert j.frame > 150 and j.out_size > 0
-    assert os.path.exists(j.out) and "hevc_videotoolbox" in " ".join(j.log)
+    assert os.path.exists(j.out) and HW in " ".join(j.log)
     eng.approve(j)
     await run_until(eng, lambda: j.stage in ("replaced", "awaiting", "failed"))
     assert j.stage == "replaced", j.error

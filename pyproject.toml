@@ -1,7 +1,8 @@
 [project]
 name = "recast"
-version = "0.1.0"
-description = "Re-encode a Plex/Sonarr/Radarr library with ffmpeg: terminal app, web app, and paced automation that only replaces clear wins."
+dynamic = ["version"]
+description = "Re-encode a Plex/Sonarr/Radarr library with ffmpeg: a terminal app for quick jobs and a server (web app + paced automation) for the arr stack."
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["textual[syntax]>=8.0", "pillow>=10", "aiohttp>=3.9"]
 
@@ -10,10 +11,14 @@ dev = ["pytest>=8", "pytest-asyncio>=0.23", "pytest-aiohttp>=1.0", "textual-serv
 
 [project.scripts]
 recast = "recast.__main__:main"
+recast-server = "recast.server:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/recast/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/recast"]

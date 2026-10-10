@@ -219,6 +219,9 @@ def build_command(s: EncodeSettings, m: "MediaInfo", src: str, out: str, caps: d
         if s.container == "mkv":
             maps += ["-map", "0:t?"]  # attachments (fonts for ASS subs)
         maps += ["-map_metadata", "0", "-map_chapters", "0"]
+        if s.container == "mkv":  # so any recast (terminal or server, any machine) knows not to redo it
+            from . import __version__
+            maps += ["-metadata", f"RECAST={__version__}"]
     g.append(maps)
     v: list[str]
     if s.codec == "copy":
@@ -405,6 +408,8 @@ def skip_reason(s: EncodeSettings, m: "MediaInfo", caps: dict[str, EncoderCap]) 
     """Why this preset isn't worth running on this file ("" = it is). Only applies with skip_same on."""
     if not s.skip_same:
         return ""
+    if m.recast:  # re-encoding a re-encode only loses quality (written by this or another recast install)
+        return "already re-encoded by recast"
     if CODEC_LABEL.get(s.codec) == m.codec and (not m.vkbps or m.vkbps <= estimate(s, m, caps)[0] * 1.15):
         return f"already {m.codec}"
     if m.size and est_bytes(s, m, caps) > m.size * 0.95:

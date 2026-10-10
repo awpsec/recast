@@ -10,6 +10,9 @@ real encodes of that show when there are any):
 A file the preset would lose something on besides bitrate (4K → 1080p, HDR, surround) is never
 automatic: however big the saving, it goes to review.
 
+Modes: off (nothing on its own) · dry (decide, never act) · ask (encode clear wins, you approve every
+replace) · on (encode and replace clear wins by themselves). Folders in auto_exclude are left alone.
+
 Pacing: automation never creates more than one running job plus one queued behind it (so the next
 copy overlaps the current encode). Each file is read from the NAS once, sequentially, and written
 back once. A whole library trickles through instead of flooding scratch.
@@ -25,7 +28,9 @@ from datetime import datetime
 
 from .config import config_dir
 from .encode import EncodeSettings, est_bytes, quality_loss, skip_reason
-from .engine import ACTIVE, norm, show_root
+from .engine import ACTIVE, ASK_FIRST, norm, show_root
+
+MODES = ("off", "dry", "ask", "on")
 
 
 class Automation:
@@ -42,6 +47,7 @@ class Automation:
         self.counts: dict = {}
         self._lock = threading.RLock()
         self._dirty = False
+        self._free: tuple[float, int | None] = (0.0, None)  # (checked at, bytes) for the library drive
         self.load()
         svc.subscribe(self.on_event)
 
@@ -82,6 +88,20 @@ class Automation:
             name = cfg.default_preset if cfg.default_preset in presets else next(iter(presets))
         return name, presets[name][1]
 
+    def excluded(self, path: str) -> bool:
+        k = norm(path)
+        return any(k == norm(x) or k.startswith(norm(x).rstrip(os.sep) + os.sep) for x in self.svc.cfg.auto_exclude)
+
+    def set_excluded(self, folder: str, on: bool) -> None:
+        cur = [x for x in self.svc.cfg.auto_exclude if norm(x) != norm(folder)]
+        self.svc.cfg.auto_exclude = cur + ([folder] if on else [])
+        self.svc.cfg.save()
+        with self._lock:
+            if on:
+                self.queue = [p for p in self.queue if not self.excluded(p["path"])]
+                self.review = {p: v for p, v in self.review.items() if not self.excluded(p)}
+        self.rebuild()
+
     def evaluate(self, m, auto_t: float | None = None, review_t: float | None = None) -> dict:
         """Score one file. Never touches the network."""
         cfg = self.svc.cfg
@@ -107,7 +127,8 @@ class Automation:
         """Re-score everything the scanner knows (cheap: cached headers). Keeps your own skips."""
         eng = self.svc.engine
         done, busy = eng.done_sizes(), eng.busy_paths()
-        queue, counts = [], {"auto": 0, "auto_bytes": 0.0, "review": 0, "skip": 0, "done": 0, "unread": 0}
+        queue = []
+        counts = {"auto": 0, "auto_bytes": 0.0, "review": 0, "skip": 0, "done": 0, "unread": 0, "excluded": 0}
         with self._lock:
             for root, path, size, mtime, m in self.svc.scanner.files():
                 k = norm(path)
@@ -115,6 +136,10 @@ class Automation:
                     counts["done"] += 1
                     continue
                 if k in busy:
+                    continue
+                if self.excluded(path):
+                    counts["excluded"] += 1
+                    self.review.pop(path, None)
                     continue
                 sk = self.skipped.get(path)
                 if sk and sk.get("size") == size and int(sk.get("mtime", 0)) == int(mtime):
@@ -154,7 +179,7 @@ class Automation:
         out = {"auto": 0, "auto_bytes": 0.0, "review": 0, "review_bytes": 0.0, "skip": 0}
         done = self.svc.engine.done_sizes()
         for _root, path, size, _mtime, m in self.svc.scanner.files():
-            if not m or done.get(norm(path)) == size:
+            if not m or done.get(norm(path)) == size or self.excluded(path):
                 continue
             sk = self.skipped.get(path)
             if sk and sk.get("by_you"):
@@ -179,6 +204,18 @@ class Automation:
         t = (now or datetime.now()).time()
         return a <= t < b if a <= b else (t >= a or t < b)  # windows can wrap past midnight
 
+    def library_free(self, path: str) -> int | None:
+        """Free bytes on the library drive (checked at most once a minute — it's a network call)."""
+        t, free = self._free
+        if time.monotonic() - t > 60 or free is None:
+            try:
+                import shutil
+                free = shutil.disk_usage(os.path.dirname(path)).free
+            except OSError:
+                free = None
+            self._free = (time.monotonic(), free)
+        return free
+
     def tick(self) -> None:
         """Called every couple of seconds. Starts at most one new job, and only when the pipeline has room."""
         cfg, eng = self.svc.cfg, self.svc.engine
@@ -189,11 +226,17 @@ class Automation:
         if eng.hold:
             self.status = "paused — you paused the queue"
             return
-        auto = [j for j in eng.jobs.values() if j.origin in ("auto", "review") and j.stage in ACTIVE]
+        mine = [j for j in eng.jobs.values() if j.origin in ("auto", "review")]
+        auto = [j for j in mine if j.stage in ACTIVE]
         waiting = [j for j in auto if j.stage in ("queued", "copying", "ready")]
+        held = [j for j in mine if j.stage == "awaiting"]
         cap = 2 if cfg.prefetch else 1  # one encoding + one copied ahead, never more
-        if mode == "on" and (waiting or len(auto) >= cap):
+        acting = mode in ("ask", "on")
+        if acting and (waiting or len(auto) >= cap):
             self.status = "working"
+            return
+        if acting and len(held) >= max(1, cfg.auto_hold_max):
+            self.status = f"paused — {len(held)} encodes are waiting for your approval"
             return
         if not self.in_hours():
             self.status = f"waiting for {cfg.auto_hours}" if not auto else "working"
@@ -208,6 +251,12 @@ class Automation:
         if mode == "dry":
             self.status = f"dry run — next would be {os.path.basename(nxt['path'])}"
             return
+        free = self.library_free(nxt["path"])
+        if free is not None and cfg.min_free_gb and free < cfg.min_free_gb * 1024**3:
+            # every replace parks the original in the trash, so space only comes back when it's purged
+            self.status = (f"paused — library drive has {free / 1024**3:.0f} GB free "
+                           f"(floor {cfg.min_free_gb} GB; originals wait in the trash for {cfg.trash_days} days)")
+            return
         root = self.svc.root_for(nxt["path"])
         m = self.svc.probes.cached(nxt["path"])
         if not root or not m:
@@ -216,7 +265,7 @@ class Automation:
             return
         name, s = self.preset_for(nxt["path"])
         j = eng.add_single(m, root, s, name, preview=False)
-        j.origin, j.auto_min_saving = "auto", cfg.auto_threshold
+        j.origin, j.auto_min_saving = "auto", (ASK_FIRST if mode == "ask" else cfg.auto_threshold)
         with self._lock:
             self.queue.pop(0)
         self.note("encode", nxt["path"], preset=name, pct=nxt["pct"], measured=nxt["measured"], job=j.id)
@@ -241,6 +290,12 @@ class Automation:
                         continue
                     if st.st_size != p["size"]:
                         self.queue.pop(0)
+                        continue
+                    if st.st_nlink > 1:  # hardlinked into a torrent client: replacing it frees nothing yet
+                        self.queue.pop(0)
+                        self.skipped[p["path"]] = {"reason": "hardlinked (still seeding?) — replacing frees nothing",
+                                                   "size": st.st_size, "mtime": st.st_mtime, "when": time.time()}
+                        self._dirty = True
                         continue
                     return p
                 return None  # library offline: wait, don't throw the plan away
@@ -329,6 +384,10 @@ class Automation:
             root = self.svc.root_for(path)
             if m.error or not root:
                 continue
+            if self.excluded(path):
+                self.svc.scanner.add_info(root.path, m)
+                self.note("new", path, verdict="excluded", pct=0, source=item["source"])
+                continue
             self.svc.scanner.add_info(root.path, m)
             with self._lock:
                 self.skipped.pop(path, None)
@@ -357,6 +416,20 @@ class Automation:
 
     # ── outcomes ──
     def on_event(self, kind: str, obj) -> None:
+        if kind == "restored":  # you undid it: never redo it on your behalf (until the file changes)
+            src = obj["src"]
+            with self._lock:
+                try:
+                    st = os.stat(src)
+                    self.skipped[src] = {"reason": "you restored the original", "by_you": True,
+                                         "size": st.st_size, "mtime": st.st_mtime, "when": time.time()}
+                except OSError:
+                    pass
+                self.queue = [p for p in self.queue if p["path"] != src]
+                self.review.pop(src, None)
+                self._dirty = True
+            self.note("restored", src)
+            return
         if kind == "replaced":  # by anyone: it's no longer a candidate
             with self._lock:
                 self.queue = [p for p in self.queue if p["path"] != obj.src]

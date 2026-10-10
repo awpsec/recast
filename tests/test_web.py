@@ -1,5 +1,6 @@
 """The web daemon's API: library, encode flow, automation, webhooks, auth and path safety."""
 import asyncio
+import time
 from pathlib import Path
 
 import pytest
@@ -7,7 +8,7 @@ import pytest
 from recast.config import Config, Root
 from recast.encode import save_preset
 from recast.service import Service
-from recast.web.server import create_app
+from recast.server.app import create_app
 
 from test_automation import CAPS, FAST, clip
 
@@ -86,7 +87,9 @@ async def test_estimate_encode_and_approve(client, svc):
             break
         await asyncio.sleep(0.1)
     hist = await ok(await client.get("/api/history"))
-    assert hist["history"][0]["can_restore"]
+    row = hist["history"][0]
+    assert row["can_restore"] and row["original"] == "trash" and row["kept_until"] > time.time() + 13 * 86400
+    assert hist["trash_bytes"] == row["src_size"] and hist["saved"] > 0
     again = await ok(await client.post("/api/estimate", json={"path": folder, "preset": "Test fast"}))
     assert again["files"] == 1 and again["skipped"] == {"done by recast": 1}
 
@@ -103,6 +106,9 @@ async def test_automation_settings_and_preview(client, svc):
     a = await ok(await client.get("/api/automation"))
     assert a["hooks"]["sonarr"].endswith("token=" + svc.cfg.webhook_token)
     assert len(a["queue"]) == 2 and not svc.engine.jobs   # dry run: nothing was started
+    d = await ok(await client.put("/api/automation", json={"auto_mode": "ask", "auto_hold_max": 3}))
+    assert svc.cfg.auto_mode == "ask" and svc.cfg.auto_hold_max == 3
+    assert [j.origin for j in svc.engine.jobs.values()] == ["auto"]   # ask mode does encode
 
 
 async def test_webhook_needs_the_token(client, svc):
@@ -155,3 +161,22 @@ async def test_index_busts_the_asset_cache(client):
     html = await r.text()
     assert "/static/app.js?v=" in html and "__V__" not in html
     assert (await client.get("/static/app.css")).status == 200
+
+
+async def test_health_is_public_and_exclusions(client, svc):
+    await ok(await client.post("/api/password", json={"password": "pw"}))
+    client.session.cookie_jar.clear()
+    h = await ok(await client.get("/api/health"))
+    assert h["setup"] and h["version"] and "roots" not in h                 # nothing sensitive
+    await ok(await client.post("/api/login", json={"password": "pw"}))
+    show = str(Path(svc.cfg.roots[0].path) / "TV" / "Show")
+    d = await ok(await client.post("/api/automation/exclude", json={"path": show, "on": True}))
+    assert d["excluded"] == [show]
+    det = await ok(await client.get("/api/library/details", params={"path": show}))
+    assert det["excluded"] and det["excluded_here"]
+    f = str(Path(show) / "Season 1" / "Show - S01E01.mkv")
+    assert (await ok(await client.get("/api/library/details", params={"path": f})))["excluded"]
+    assert (await ok(await client.get("/api/automation")))["counts"]["excluded"] == 2
+    await ok(await client.post("/api/automation/exclude", json={"path": show, "on": False}))
+    assert not svc.cfg.auto_exclude
+    assert (await client.post("/api/automation/exclude", json={"path": "/etc", "on": True})).status == 400

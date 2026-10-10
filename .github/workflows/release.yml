@@ -1,0 +1,30 @@
+name: release
+
+# Push a tag like v0.3.0 (matching __version__) → tests → a GitHub release with the wheel attached.
+# `recast update` installs that wheel; the docker workflow publishes the matching image.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - name: Tag matches __version__
+        run: |
+          v=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/recast/__init__.py)
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME but __version__ is $v"; exit 1; }
+      - run: uv build
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "recast $GITHUB_REF_NAME" --generate-notes --verify-tag

@@ -1,3 +1,4 @@
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -6,6 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 HAVE_FFMPEG = shutil.which("ffmpeg") is not None
+os.environ["RECAST_NO_UPDATE_CHECK"] = "1"  # tests never ask GitHub for releases
 
 
 @pytest.fixture

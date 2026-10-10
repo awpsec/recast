@@ -1,0 +1,11 @@
+.git
+.github
+.venv
+.demo
+.pytest_cache
+**/__pycache__
+*.egg-info
+dist
+tests
+scripts
+docker/compose*.yaml

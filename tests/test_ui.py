@@ -84,7 +84,8 @@ async def test_find_palette_searches_everything(home, tmp_path):
         await wait(pilot, lambda: tree.root.children and tree.root.children[0].data.loaded, 10)
         tree.move_cursor(tree.root.children[0])                 # highlight the library → overview scan
         await wait(pilot, lambda: app._scan is None and app.overview, 30)
-        assert [s.name for s in app.overview[str(lib)]] and app.query_one("#wins").row_count == 2
+        await wait(pilot, lambda: app.query_one("#wins").row_count == 2, 10)   # drawn on the next refresh
+        assert sorted(s.name for s in app.overview[str(lib)]) == ["Alpha Show (2020)", "Beta Show (2021)"]
         tree.root.children[0].collapse()
         await pilot.press("slash")
         await wait(pilot, lambda: type(app.screen).__name__ == "FindScreen", 5)

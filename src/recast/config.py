@@ -196,10 +196,12 @@ class Config:
     # ── automation (runs in `recast-server`) ──
     auto_mode: str = "off"          # off | dry (decisions only) | ask (encode, you approve) | on (fully automatic)
     auto_preset: str = ""           # "" = default preset
-    auto_preset_anime: str = ""     # used for series Sonarr marks as anime ("" = same as auto_preset)
+    # Use another preset for some shows/movies, by what Sonarr/Radarr say about them. First match wins:
+    # [{"by": "type" | "genre" | "tag" | "source", "value": "anime", "preset": "Anime HEVC · 1800k"}]
+    auto_rules: list = field(default_factory=list)
     auto_threshold: float = 0.30    # estimated saving ≥ this → encode + replace automatically (if the real saving holds)
     review_threshold: float = 0.10  # between this and auto_threshold → review list; below → skip
-    auto_hours: str = ""            # "" = any time, or "01:00-08:00" to only start new work in that window
+    auto_hours: str = ""            # "" = any time, or "01:00-08:00" (this machine's clock) to only start new work then
     sweep_hours: int = 24           # re-list the library for new/changed files this often
     auto_exclude: list = field(default_factory=list)  # folders automation leaves alone (manual encodes still work)
     auto_hold_max: int = 10         # ask mode: stop encoding once this many wait for your approval
@@ -235,6 +237,8 @@ class Config:
         c.encoders = {k: EncoderCap(**v) if isinstance(v, dict) else v for k, v in c.encoders.items()}
         c.sonarr = Arr(**c.sonarr) if isinstance(c.sonarr, dict) else c.sonarr
         c.radarr = Arr(**c.radarr) if isinstance(c.radarr, dict) else c.radarr
+        if raw.get("auto_preset_anime") and "auto_rules" not in raw:  # before rules, anime had its own setting
+            c.auto_rules = [{"by": "type", "value": "anime", "preset": raw["auto_preset_anime"]}]
         if c.theme == "tokyo-night":  # the old built-in default, never chosen by hand
             c.theme = "recast"
         return c

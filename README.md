@@ -38,7 +38,9 @@ Then open `http://<server>:8484`. In `.env`, set:
   and only then written back.
 - `PUID` / `PGID`: the user that owns your media (run `id` as that user to get the numbers).
   Replaced files keep that owner, so Sonarr/Radarr can still manage them.
-- `TZ`: your timezone, used for working hours.
+- `TZ`: leave it empty. The container follows the server's own timezone through the
+  `/etc/localtime` mount in `compose.yaml`, so working hours like 01:00–08:00 are the server's local
+  time. Set it (e.g. `TZ=America/Phoenix`) only to override that. The log prints the clock at startup.
 
 On first start the server sets itself up from these values. It tests every encoder (Quick Sync and
 VA-API through `/dev/dri`, NVENC with the NVIDIA runtime, x265/SVT-AV1 otherwise), reads the
@@ -109,6 +111,7 @@ WantedBy=default.target
 | `RECAST_SONARR_URL`, `RECAST_SONARR_API_KEY`, `RECAST_RADARR_URL`, `RECAST_RADARR_API_KEY` | connect Sonarr/Radarr on first start |
 | `RECAST_HOST`, `RECAST_PORT` | listen address (the image uses `0.0.0.0:8484`) |
 | `PUID`, `PGID`, `UMASK` | who the server runs as inside the container (default `1000:1000`, `002`) |
+| `TZ` | override the timezone working hours use (default: the server's own, via the `/etc/localtime` mount) |
 | `RECAST_LOG` | `INFO` (default) or `DEBUG`; everything that happens is logged to `docker logs recast` |
 
 Environment values only fill in settings that are still empty. Once you change something in the
@@ -161,18 +164,35 @@ The goal is a library that improves overnight without a hammered NAS or a full s
   one file at a time instead of being queued all at once.
 - Each file is read from the NAS once, start to finish, and written back once.
 - Biggest savings go first. New downloads (from the webhook) jump to the front.
-- Optional working hours (e.g. 01:00–08:00) for starting new files.
+- Optional working hours (e.g. 01:00–08:00) for starting new files, on the server's clock. The
+  Automation page shows that clock, and what the window is in your browser's time when they differ.
 - Scratch budget (default 200 GB): no new work starts while encodes waiting for you use more than that.
 - Library drive floor (default 50 GB free): automation pauses below it. Each replace keeps the original
   in the trash for a while, so the space only comes back when it's purged (see below).
 - If the share drops off, recast waits and doesn't lose anything. It re-lists folders every 24 hours (cheap) to
   find new files. With webhooks you rarely need it.
-- Series that Sonarr marks as **anime** can use their own preset (e.g. *Anime HEVC · 1800k*).
+
+### Which preset
+
+Automation uses your **preferred preset** for everything, unless a **rule** says otherwise. Rules match
+what Sonarr/Radarr know about a show or movie, and the first one that matches wins:
+
+| Rule | Example |
+|---|---|
+| Series type (Sonarr) | type is `anime` → *Anime HEVC · 1800k* |
+| Genre | genre is `Animation` → *Anime → HEVC · quality* |
+| Tag | tag is `4k` → *4K HDR HEVC · CRF 18* |
+| Everything from | everything from Radarr → *Live action HEVC · 3200k · 5.1* |
+
+Add them under **Automation → Which preset**. Once Sonarr/Radarr are connected, the pickers list their
+genres and tags with how many shows and movies have each. A tag you make in Sonarr just for recast
+(say `recast-quality`) is the easiest way to single out a handful of shows. A folder's page in the
+Library says which preset automation will use there, and which rule picked it.
 
 ### Sonarr / Radarr
 
 1. **Settings → Sonarr & Radarr**: enter the URL and API key, then click *Save & test*. recast maps
-   their folder paths to its own automatically. It needs this for webhooks, anime detection,
+   their folder paths to its own automatically. It needs this for webhooks, preset rules,
    episode names and the rescan after each replace.
 2. On the **Automation** page, copy the webhook URL for each.
 3. In Sonarr/Radarr: **Settings → Connect → + → Webhook**. Paste the URL, set the method to POST,

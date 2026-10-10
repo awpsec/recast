@@ -3,7 +3,7 @@
 #   mkdir -p ~/recast && cd ~/recast
 #   curl -fsSLO https://raw.githubusercontent.com/awpsec/recast/main/compose.yaml
 #   curl -fsSL https://raw.githubusercontent.com/awpsec/recast/main/.env.example -o .env
-#   nano .env                      # library paths, PUID/PGID, timezone
+#   nano .env                      # library paths, PUID/PGID
 #   docker compose up -d           # → http://<this server>:8484
 #
 # Update:  docker compose pull && docker compose up -d
@@ -24,13 +24,14 @@ services:
       PUID: ${PUID:-1000}               # same user/group as Sonarr/Radarr, so replaced files keep their owner
       PGID: ${PGID:-1000}
       UMASK: ${UMASK:-002}
-      TZ: ${TZ:-Etc/UTC}                # working hours ("only 01:00–08:00") use this
+      TZ: ${TZ:-}                       # empty = this server's own timezone (the /etc/localtime mount below)
       RECAST_LIBRARIES: /tv,/movies     # first start only; change folders in Settings afterwards
       RECAST_SONARR_URL: ${SONARR_URL:-}
       RECAST_SONARR_API_KEY: ${SONARR_API_KEY:-}
       RECAST_RADARR_URL: ${RADARR_URL:-}
       RECAST_RADARR_API_KEY: ${RADARR_API_KEY:-}
     volumes:
+      - /etc/localtime:/etc/localtime:ro        # same clock as this server: "only 01:00–08:00" means local time
       - ${CONFIG_DIR:-./config}:/config
       - ${SCRATCH_DIR:-./scratch}:/scratch    # a fast local disk; copies + encodes happen here
       - ${TV_DIR:?set TV_DIR in .env}:/tv

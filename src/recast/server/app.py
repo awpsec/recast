@@ -25,7 +25,7 @@ from ..arr import ArrClient, ArrError, auto_map
 from ..config import Root, config_dir, default_scratch, is_network_path, machine_summary, suggest_libraries
 from ..encode import (CODEC_LABEL, SCHEMA, EncodeSettings, already_target, bitrate_word, crf_word, delete_preset,
                       est_bytes, est_fps, resolve_encoder, save_preset, skip_reason)
-from ..automation import MODES
+from ..automation import MODES, RULE_BY, server_clock
 from ..engine import ACTIVE, LIVE, Batch, Job, norm
 from ..overview import duplicate_groups, pretty_title
 from ..probe import VIDEO_EXT
@@ -523,6 +523,7 @@ async def _details(request):
                 "partial": bool(missing), "codecs": codecs, "gains": _gains(svc, infos, path),
                 "recast": {"files": k, "before": before, "after": after}, "arr": rec,
                 "last_used": svc.engine.last_used(path), "excluded": svc.automation.excluded(path),
+                "auto_preset": _auto_choice(svc, path),
                 "excluded_here": any(norm(x) == norm(path) for x in svc.cfg.auto_exclude)})
 
 
@@ -712,7 +713,7 @@ async def _inbox_action(request):
 
 
 # ── automation ──
-AUTO_KEYS = ("auto_mode", "auto_preset", "auto_preset_anime", "auto_threshold", "review_threshold", "auto_hours",
+AUTO_KEYS = ("auto_mode", "auto_preset", "auto_rules", "auto_threshold", "review_threshold", "auto_hours",
              "sweep_hours", "prefetch", "auto_hold_max")
 
 
@@ -753,14 +754,38 @@ async def _automation(request):
                 "log": a.log[-150:][::-1], "last_sweep": a.last_sweep, "pending": a.pending,
                 "hooks": _hook_urls(request), "presets": list(svc.presets), "default_preset": cfg.default_preset,
                 "excluded": cfg.auto_exclude,
-                "arr": {"sonarr": cfg.sonarr.enabled, "radarr": cfg.radarr.enabled}})
+                "arr": {"sonarr": cfg.sonarr.enabled, "radarr": cfg.radarr.enabled,
+                        "ready": bool(svc.arr and svc.arr.ready), "errors": svc.arr.errors if svc.arr else {}},
+                "rule_options": svc.arr.facets() if svc.arr else {}, "clock": server_clock()})
+
+
+def _clean_rules(rules, presets) -> list | str:
+    """Validated preset rules, or an error message."""
+    if not isinstance(rules, list) or len(rules) > 50:
+        return "rules must be a list (at most 50)"
+    out = []
+    for r in rules:
+        if not isinstance(r, dict) or r.get("by") not in RULE_BY:
+            return "each rule needs by = " + " / ".join(RULE_BY)
+        value = str(r.get("value", "")).strip()[:200]
+        if not value:
+            return "each rule needs a value"
+        if r.get("preset") not in presets:
+            return f"no preset called {r.get('preset')!r}"
+        out.append({"by": r["by"], "value": value, "preset": r["preset"]})
+    return out
+
+
+def _auto_choice(svc: Service, path: str) -> dict:
+    name, rule = svc.automation.preset_choice(path)
+    return {"preset": name, "rule": rule}
 
 
 async def _automation_put(request):
     svc: Service = request.app["svc"]
     body = await request.json()
     cfg = svc.cfg
-    before = (cfg.auto_preset, cfg.auto_preset_anime, cfg.auto_threshold, cfg.review_threshold)
+    before = (cfg.auto_preset, json.dumps(cfg.auto_rules), cfg.auto_threshold, cfg.review_threshold)
     for k in AUTO_KEYS:
         if k in body:
             v = body[k]
@@ -772,11 +797,21 @@ async def _automation_put(request):
                 return _err("mode must be one of " + ", ".join(MODES))
             elif k == "prefetch":
                 v = bool(v)
+            elif k == "auto_rules":
+                v = _clean_rules(v, svc.presets)
+                if isinstance(v, str):
+                    return _err(v)
+            elif k == "auto_hours" and v:
+                try:
+                    a, b = (time.strptime(x.strip(), "%H:%M") for x in str(v).split("-"))
+                except ValueError:
+                    return _err("working hours look like 01:00-08:00")
+                v = f"{a.tm_hour:02d}:{a.tm_min:02d}-{b.tm_hour:02d}:{b.tm_min:02d}"
             setattr(cfg, k, v)
     if cfg.review_threshold > cfg.auto_threshold:
         cfg.review_threshold = cfg.auto_threshold
     cfg.save()
-    if before != (cfg.auto_preset, cfg.auto_preset_anime, cfg.auto_threshold, cfg.review_threshold):
+    if before != (cfg.auto_preset, json.dumps(cfg.auto_rules), cfg.auto_threshold, cfg.review_threshold):
         await asyncio.to_thread(svc.automation.reset_decisions)
     svc.automation.tick()
     return _ok(counts=svc.automation.counts, status=svc.automation.status)
@@ -844,6 +879,8 @@ async def _hook(request):
     except ValueError:
         return _err("expected JSON")
     path = svc.automation.webhook(kind, payload)
+    if path and svc.arr and not svc.arr.lookup(path) and time.time() - svc.arr.refreshed > 300:
+        _spawn(request.app, asyncio.to_thread(svc.arr.refresh), "arr")  # something Sonarr/Radarr just added
     return _ok(path=path)
 
 

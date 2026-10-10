@@ -113,6 +113,24 @@ async def test_automation_settings_and_preview(client, svc):
     assert [j.origin for j in svc.engine.jobs.values()] == ["auto"]   # ask mode does encode
 
 
+
+async def test_preset_rules_and_the_server_clock(client, svc):
+    a = await ok(await client.get("/api/automation"))
+    assert a["clock"]["now"] and "offset" in a["clock"] and a["rule_options"] == {}   # no Sonarr/Radarr here
+    for bad in ({"by": "colour", "value": "x", "preset": "Test fast"}, {"by": "genre", "value": "x", "preset": "Nope"},
+                {"by": "genre", "value": " ", "preset": "Test fast"}):
+        assert (await client.put("/api/automation", json={"auto_rules": [bad]})).status == 400
+    await ok(await client.put("/api/automation", json={"auto_rules": [
+        {"by": "genre", "value": " Animation ", "preset": "Test fast", "junk": 1}]}))
+    assert svc.cfg.auto_rules == [{"by": "genre", "value": "Animation", "preset": "Test fast"}]
+    assert Config.load().auto_rules == svc.cfg.auto_rules
+    show = Path(svc.cfg.roots[0].path) / "TV" / "Show"
+    d = await ok(await client.get("/api/library/details", params={"path": str(show)}))
+    assert d["auto_preset"] == {"preset": "Test fast", "rule": None}       # no Sonarr: no genre, preferred preset
+    assert (await client.put("/api/automation", json={"auto_hours": "1am-8am"})).status == 400
+    await ok(await client.put("/api/automation", json={"auto_hours": "1:00-8:30"}))
+    assert svc.cfg.auto_hours == "01:00-08:30"
+
 async def test_webhook_needs_the_token(client, svc):
     lib = Path(svc.cfg.roots[0].path)
     payload = {"eventType": "Download", "series": {"path": str(lib / "TV" / "Show")},

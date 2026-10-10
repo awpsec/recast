@@ -15,6 +15,8 @@ RUN set -eux; \
     ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg; \
     ln -s /usr/lib/jellyfin-ffmpeg/ffprobe /usr/local/bin/ffprobe; \
     apt-get purge -y --auto-remove curl gnupg; \
+    # a plain file, not a symlink, so compose's /etc/localtime mount (the host's zone) replaces it in place
+    rm -f /etc/localtime; cp /usr/share/zoneinfo/Etc/UTC /etc/localtime; \
     rm -rf /var/lib/apt/lists/*; \
     ffmpeg -hide_banner -version | head -1
 

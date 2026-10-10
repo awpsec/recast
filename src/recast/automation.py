@@ -24,7 +24,7 @@ import os
 import threading
 import time
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .config import config_dir
 from .encode import EncodeSettings, est_bytes, quality_loss, skip_reason
@@ -32,6 +32,60 @@ from .engine import ACTIVE, ASK_FIRST, norm, show_root
 
 MODES = ("off", "dry", "ask", "on")
 
+RULE_BY = ("type", "genre", "tag", "source")  # Sonarr series type · genre · tag · everything from Sonarr/Radarr
+
+
+def rule_matches(rule: dict, facts: dict) -> bool:
+    """Does a preset rule match what Sonarr/Radarr know about a show/movie? Case doesn't matter."""
+    want = str(rule.get("value", "")).strip().lower()
+    by = rule.get("by")
+    if not want or not facts:
+        return False
+    if by in ("type", "source"):
+        return str(facts.get(by) or "").lower() == want
+    if by in ("genre", "tag"):
+        return want in {str(x).lower() for x in facts.get(by + "s") or []}
+    return False
+
+
+def payload_facts(source: str, payload: dict) -> dict:
+    """{source, type, genres, tags} from a Sonarr/Radarr webhook (tags arrive as labels in v4+/v5+)."""
+    obj = payload.get("series" if source == "sonarr" else "movie") or {}
+    out = {"source": source.title()}
+    if obj.get("type"):
+        out["type"] = obj["type"]
+    for k in ("genres", "tags"):
+        vals = [x for x in obj.get(k) or [] if isinstance(x, str)]
+        if vals:
+            out[k] = vals
+    return out
+
+
+def server_clock(now: datetime | None = None) -> dict:
+    """This machine's clock, which working hours run on: {zone, abbr, offset (minutes from UTC), now, container}.
+    In Docker that's the host's when compose mounts /etc/localtime (or TZ is set); otherwise UTC."""
+    now = now if now and now.tzinfo else (now or datetime.now()).astimezone()
+    off = now.utcoffset() or timedelta()
+    name = os.environ.get("TZ", "").lstrip(":")
+    if not name:
+        try:
+            target = os.readlink("/etc/localtime")
+            name = target.split("zoneinfo/", 1)[1] if "zoneinfo/" in target else ""
+        except OSError:
+            name = ""
+    # Don't show a name that disagrees with the clock. Mounting the host's /etc/localtime over a symlink to
+    # Etc/UTC lands on that zone file itself, so a UTC name with a non-zero offset is wrong even if it checks out.
+    if name and (name.split("/")[-1] in ("UTC", "UCT", "Universal", "Zulu", "GMT") and off):
+        name = ""
+    if name:
+        try:
+            from zoneinfo import ZoneInfo
+            if ZoneInfo(name).utcoffset(now.replace(tzinfo=None)) != off:
+                name = ""
+        except Exception:  # noqa: BLE001 — unknown zone, POSIX TZ string, no tzdata
+            name = ""
+    return {"zone": name, "abbr": now.tzname() or "", "offset": int(off.total_seconds() // 60),
+            "now": now.strftime("%H:%M"), "container": os.path.exists("/.dockerenv")}
 
 class Automation:
     def __init__(self, svc):
@@ -80,13 +134,21 @@ class Automation:
             self._dirty = True
 
     # ── decisions ──
-    def preset_for(self, path: str) -> tuple[str, EncodeSettings]:
+    def preset_choice(self, path: str) -> tuple[str, dict | None]:
+        """The preset automation uses for a file, and the rule that picked it (None = the preferred preset)."""
         cfg, presets = self.svc.cfg, self.svc.presets
-        anime = self.svc.scanner.series_type(path) == "anime"
-        name = (cfg.auto_preset_anime if anime and cfg.auto_preset_anime else cfg.auto_preset) or cfg.default_preset
+        rule = None
+        if cfg.auto_rules:
+            facts = self.svc.scanner.arr_facts(path)
+            rule = next((r for r in cfg.auto_rules if r.get("preset") in presets and rule_matches(r, facts)), None)
+        name = rule["preset"] if rule else (cfg.auto_preset or cfg.default_preset)
         if name not in presets:
             name = cfg.default_preset if cfg.default_preset in presets else next(iter(presets))
-        return name, presets[name][1]
+        return name, rule
+
+    def preset_for(self, path: str) -> tuple[str, EncodeSettings]:
+        name = self.preset_choice(path)[0]
+        return name, self.svc.presets[name][1]
 
     def excluded(self, path: str) -> bool:
         k = norm(path)
@@ -239,7 +301,7 @@ class Automation:
             self.status = f"paused — {len(held)} encodes are waiting for your approval"
             return
         if not self.in_hours():
-            self.status = f"waiting for {cfg.auto_hours}" if not auto else "working"
+            self.status = f"waiting for {cfg.auto_hours} ({server_clock()['abbr']})" if not auto else "working"
             return
         if eng.held_bytes() > cfg.max_scratch_gb * 1024**3:
             self.status = "paused — scratch is full of encodes waiting for your review"
@@ -360,9 +422,8 @@ class Automation:
             self.note("webhook-ignored", local, reason="not inside a library folder (check path mapping)",
                       source=source)
             return None
-        stype = (payload.get("series") or {}).get("type")
-        if stype:  # Sonarr tells us anime vs standard right in the payload
-            self.svc.scanner.type_hints[norm(show_root(local))] = stype
+        # the payload says what the show/movie is (type, genres, tags) before the hourly index knows it
+        self.svc.scanner.hints[norm(show_root(local))] = payload_facts(source, payload)
         with self._lock:
             self.pending = [p for p in self.pending if p["path"] != local]
             self.pending.append({"path": local, "due": time.time() + 90, "source": source})

@@ -33,7 +33,7 @@ class LibraryScanner:
         self.snap_when: dict[str, float] = {}
         self.rank_by: str | None = "★"          # "★" = default preset, None = best of all, else a preset name
         self.dirty = False
-        self.type_hints: dict[str, str] = {}   # show folder → "anime"/"standard" from Sonarr webhooks
+        self.hints: dict[str, dict] = {}       # show/movie folder → what a Sonarr/Radarr webhook said about it
         self._lock = threading.Lock()
 
     # ── loading / scanning ──
@@ -129,12 +129,18 @@ class LibraryScanner:
             return t if norm(t).startswith(nroot) else root
         return title
 
-    def series_type(self, path: str) -> str | None:
-        hint = self.type_hints.get(norm(show_root(path)))
-        if hint:
-            return hint
+    def arr_facts(self, path: str) -> dict:
+        """What Sonarr/Radarr know about the show or movie a file belongs to: {source, type, genres, tags}.
+        The index (refreshed hourly) wins; a webhook fills in for things added since."""
+        facts = dict(self.hints.get(norm(show_root(path))) or {})
         rec = self.svc.arr.lookup(path) if self.svc.arr else None
-        return (rec or {}).get("series_type") or None
+        if rec:
+            facts.update({k: v for k, v in (("source", rec["source"]), ("type", rec.get("series_type")),
+                                             ("genres", rec.get("genres")), ("tags", rec.get("tags"))) if v})
+        return facts
+
+    def series_type(self, path: str) -> str | None:
+        return self.arr_facts(path).get("type") or None
 
     def files(self) -> Iterator[tuple[str, str, int, float, MediaInfo | None]]:
         """(root, path, size, mtime, info or None) for every listed file in every library folder."""

@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -71,14 +72,17 @@ class ArrIndex:
         self.profiles: dict[str, dict[int, str]] = {}
         self.errors: dict[str, str] = {}
         self.ready = False
+        self.refreshed = 0.0  # when the last refresh started
         self._lock = threading.Lock()
 
     def refresh(self) -> None:
         """Blocking; run in a thread."""
+        self.refreshed = time.time()
         items: dict[str, dict] = {}
         for kind, c in self.clients.items():
             try:
                 self.profiles[kind] = {p["id"]: p["name"] for p in c.req("GET", "qualityprofile")}
+                tags = {t["id"]: t["label"] for t in c.req("GET", "tag")}
                 records = c.req("GET", "series" if kind == "Sonarr" else "movie", timeout=60)
                 for r in records:
                     local = c.to_local(r["path"])
@@ -86,7 +90,8 @@ class ArrIndex:
                     rec = {"source": kind, "id": r["id"], "title": r.get("title", ""), "year": r.get("year"),
                            "status": r.get("status", ""), "monitored": r.get("monitored", False),
                            "profile": self.profiles[kind].get(r.get("qualityProfileId"), ""),
-                           "path": local}
+                           "path": local, "genres": list(r.get("genres") or []),
+                           "tags": [tags[t] for t in r.get("tags") or [] if t in tags]}
                     if kind == "Sonarr":
                         rec["episodes"] = f"{stats.get('episodeFileCount', 0)}/{stats.get('episodeCount', 0)} files"
                         rec["series_type"] = r.get("seriesType", "")  # "anime" / "standard" / "daily"
@@ -101,6 +106,23 @@ class ArrIndex:
         with self._lock:
             self.items = items
             self.ready = True
+
+    def facets(self) -> dict[str, list[dict]]:
+        """What preset rules can match on, with how many shows/movies have each value:
+        {"genre": [{"value": "Animation", "shows": 34, "movies": 2}, …], "tag": […], "type": […], "source": […]}"""
+        counts: dict[str, dict[str, list[int]]] = {"type": {}, "genre": {}, "tag": {}, "source": {}}
+        with self._lock:
+            records = list(self.items.values())
+        for r in records:
+            i = 0 if r["source"] == "Sonarr" else 1
+            vals = {"source": [r["source"]], "type": [r["series_type"]] if r.get("series_type") else [],
+                    "genre": r.get("genres") or [], "tag": r.get("tags") or []}
+            for by, vs in vals.items():
+                for v in vs:
+                    counts[by].setdefault(v, [0, 0])[i] += 1
+        return {by: [{"value": v, "shows": n[0], "movies": n[1]}
+                     for v, n in sorted(c.items(), key=lambda x: (-sum(x[1]), x[0].lower()))]
+                for by, c in counts.items()}
 
     def lookup(self, local_path: str) -> dict | None:
         """The series/movie whose folder contains local_path."""

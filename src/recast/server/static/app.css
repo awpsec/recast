@@ -70,7 +70,7 @@ code, .mono, .num { font-family: var(--mono); font-size: 12.5px; }
 .small { font-size: 12.5px; }
 
 /* ── shell: a slim sticky bar, one status line, then a single column ── */
-.wrap { width: 100%; max-width: var(--page); margin: 0 auto; padding-left: var(--gutter); padding-right: var(--gutter); }
+.shell { width: 100%; max-width: var(--page); margin: 0 auto; padding-left: var(--gutter); padding-right: var(--gutter); }
 .top {
   position: sticky; top: 0; z-index: 10; border-bottom: 1px solid var(--border);
   background: color-mix(in srgb, var(--bg) 86%, transparent); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
@@ -145,6 +145,8 @@ a.stat-cell:hover { background: var(--zebra); text-decoration: none; }
 .list > .empty, .list > .more { padding: 6px 10px; color: var(--dim); font-size: 12.5px; }
 .item .sub, .table .sub { color: var(--dim); font-size: 12px; }
 .log .item { font-size: 13px; }
+.list > .item.rule { flex-wrap: wrap; gap: 6px 8px; }
+.rule .rule-by { width: 150px; } .rule .rule-value { width: 170px; } .rule .rule-preset { width: 240px; max-width: 100%; }
 .log time { color: var(--dim); font: 12px var(--mono); flex: none; min-width: 44px; white-space: nowrap; }
 
 .table-wrap { overflow-x: auto; margin: 0 -10px; }
@@ -183,6 +185,7 @@ a.stat-cell:hover { background: var(--zebra); text-decoration: none; }
 .btn.ghost:hover { background: var(--hover); color: var(--text); }
 .btn.sm { height: 26px; padding: 0 9px; font-size: 12.5px; }
 .btn.icon { width: 30px; padding: 0; }
+.btn.sm.icon { width: 26px; }
 input[type=text], input[type=password], input[type=number], input[type=search], input[type=time], input[type=url], select, textarea {
   height: 30px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--border-strong);
   background: var(--bg); color: var(--text); font: 13px var(--sans); min-width: 0;
@@ -365,4 +368,7 @@ option.bad { color: var(--red); }
   .field-row { grid-template-columns: minmax(0, 1fr); }
   .opts { grid-template-columns: minmax(0, 1fr); }
   .hide-sm { display: none !important; }
+  .rule .rule-by, .rule .rule-value { width: auto; flex: 1 1 110px; min-width: 0; }
+  .rule .rule-preset { width: auto; flex: 1 1 180px; min-width: 0; }
+  .rule > .meta { display: none; }
 }

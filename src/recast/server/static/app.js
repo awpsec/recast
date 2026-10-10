@@ -160,6 +160,11 @@ const originBadge = (o) => (o === "auto" ? h("span", { class: "badge outline" },
   : o === "review" ? h("span", { class: "badge outline" }, "you said go") : null);
 const MODE = { off: ["Off", ""], dry: ["Dry run", "blue"], ask: ["Ask first", "amber"], on: ["Automatic", "green"] };
 const MODES = ["off", "dry", "ask", "on"];
+// preset rules match what Sonarr/Radarr say about a show or movie
+const RULE_BY = { type: "Series type", genre: "Genre", tag: "Tag", source: "Everything from" };
+const RULE_FIXED = { type: ["anime", "standard", "daily"], source: ["Sonarr", "Radarr"] };
+const ruleText = (r) => (r.by === "source" ? `everything from ${r.value}` : `${RULE_BY[r.by].toLowerCase()} is ${r.value}`);
+const fmtOffset = (m) => `UTC${m < 0 ? "−" : "+"}${Math.floor(Math.abs(m) / 60)}${Math.abs(m) % 60 ? ":" + String(Math.abs(m) % 60).padStart(2, "0") : ""}`;
 const shortDate = (t) => new Date(t * 1000).toLocaleDateString([], { month: "short", day: "numeric" });
 
 function codecBar(codecs, size, width = "") {
@@ -193,25 +198,25 @@ async function getPresets(force) {
 function renderShell() {
   const nav = h("nav", { class: "nav" }, NAV.map(([id, label]) =>
     h("a", { href: "#/" + id, "data-id": id, title: label }, icon(id), h("span", { class: "label" }, label), h("span", { class: "count hidden", "data-count": id }))));
-  const top = h("header", { class: "top" }, h("div", { class: "wrap top-in" },
+  const top = h("header", { class: "top" }, h("div", { class: "shell top-in" },
     h("a", { class: "brand", href: "#/dashboard" }, h("div", { class: "brand-mark" }, "r"), h("span", {}, "recast")),
     nav,
     h("div", { class: "top-right" },
       h("span", { class: "conn", id: "conn", title: "connecting…" }, h("i", { class: "dot", id: "conn-dot" }), h("span", { id: "conn-text" })),
       S.info.update ? h("a", { href: "#/settings", class: "upd hide-sm", title: "docker compose pull && docker compose up -d" }, `↑ v${S.info.update.version}`) : null,
       h("button", { class: "btn sm", id: "tb-hold", onclick: toggleHold }, "Pause"))));
-  const status = h("div", { class: "wrap statusline" },
+  const status = h("div", { class: "shell statusline" },
     h("a", { href: "#/automation", id: "tb-auto", class: "badge" }),
     h("span", { id: "tb-auto-status", class: "trunc" }),
     h("span", { class: "stat", id: "tb-encoding" }),
     h("span", { class: "stat" }, "Saved", h("b", { id: "tb-saved", class: "green" }, "—")),
     h("span", { class: "stat hide-sm" }, "Scratch", h("b", { id: "tb-scratch" }, "—")));
   const m = S.info.machine || {};
-  const foot = h("footer", { class: "wrap foot" },
+  const foot = h("footer", { class: "shell foot" },
     h("span", { title: [m.os, m.cpu, m.gpu].filter(Boolean).join(" · ") }, [m.host, S.info.hevc_encoder].filter(Boolean).join(" · ")),
     h("span", {}, `recast-server v${S.info.version || ""}`),
     S.info.update ? h("a", { href: S.info.update.url, target: "_blank", rel: "noopener" }, `v${S.info.update.version} is out`) : null);
-  $("#app").replaceChildren(top, status, h("div", { class: "wrap", id: "banners" }), h("main", { class: "wrap page", id: "page" }), foot);
+  $("#app").replaceChildren(top, status, h("div", { class: "shell", id: "banners" }), h("main", { class: "shell page", id: "page" }), foot);
 }
 
 async function toggleHold() {
@@ -525,7 +530,7 @@ function nextItem(p, i) {
   return h("div", { class: "item", title: p.path },
     i != null ? h("span", { class: "num dim", style: "width:22px;flex:none" }, i + 1) : null,
     h("span", { class: "trunc grow" }, base(p.path)),
-    h("span", { class: "dim trunc hide-sm", style: "flex:0 1 34%" }, parentName(p.path)),
+    h("span", { class: "dim trunc hide-sm", style: "flex:0 1 40%" }, `${parentName(p.path)} · ${p.preset}`),
     h("span", { class: "num dim nowrap hide-sm" }, fsize(p.size)),
     h("span", { class: "num green nowrap", style: "width:48px;text-align:right" }, "−" + pct(p.pct)));
 }
@@ -711,7 +716,8 @@ function folderDetails(d) {
   const cb = codecBar(d.codecs, d.size);
   const r = d.recast;
   const sub = [d.partial ? h("span", { class: "blue" }, `reading headers ${num(d.read)}/${num(d.files)}…`) : "",
-    d.arr ? `${d.arr.source}: ${d.arr.title}${d.arr.series_type === "anime" ? " (anime)" : ""}` : ""].filter(Boolean);
+    d.arr ? [`${d.arr.source}: ${d.arr.title}${d.arr.series_type && d.arr.series_type !== "standard" ? ` (${d.arr.series_type})` : ""}`,
+      (d.arr.genres || []).join(", "), d.arr.tags && d.arr.tags.length ? `tagged ${d.arr.tags.join(", ")}` : ""].filter(Boolean).join(" · ") : ""].filter(Boolean);
   return [
     h("div", { class: "sec-head", style: "margin:0" }, h("h1", { class: "trunc grow" }, d.name), meta(`${plural(d.files, "file")} · ${fsize(d.size)}`),
       h("button", { class: "btn primary sm", onclick: () => encodeModal(d.path, true, d.last_used ? d.last_used.preset : null, d.files) }, "Encode…")),
@@ -721,6 +727,8 @@ function folderDetails(d) {
       r.files ? h("div", {}, h("span", { class: "green" }, `✓ recast re-encoded ${plural(r.files, "file")} here`), ` · ${fsize(r.before)} → ${fsize(r.after)} (−${pct(saving(r.before, r.after))})`) : "",
       d.last_used ? h("div", { class: "dim" }, `Last used here: ${d.last_used.preset}`) : "") : "",
     excludeRow(d),
+    d.auto_preset && !d.excluded ? h("div", { class: "dim small" }, "Automation uses ", h("span", { class: "muted" }, d.auto_preset.preset),
+      d.auto_preset.rule ? ` here (rule: ${ruleText(d.auto_preset.rule)})` : " here (your preferred preset)") : "",
   ];
 }
 
@@ -1117,7 +1125,62 @@ PAGES.automation = async (pg) => {
   // presets
   const presetOpts = (sel, blank) => [blank ? h("option", { value: "" }, blank) : null, ...d.presets.map((p) => h("option", { value: p, selected: p === sel }, p))];
   const prefSel = h("select", { onchange: (e) => save({ auto_preset: e.target.value }).then(refreshPreview) }, presetOpts(s.auto_preset, `Default (${d.default_preset})`));
-  const animeSel = h("select", { onchange: (e) => save({ auto_preset_anime: e.target.value }).then(refreshPreview) }, presetOpts(s.auto_preset_anime, "Same as above"));
+
+  // rules: another preset for some shows/movies, by what Sonarr/Radarr say about them. First match wins.
+  const rules = (s.auto_rules || []).map((r) => ({ ...r }));
+  const opts = d.rule_options || {};
+  const rulesBox = h("div", { class: "list" }), rulesNote = h("div");
+  const titles = (o) => (o ? [o.shows ? plural(o.shows, "show") : "", o.movies ? plural(o.movies, "movie") : ""].filter(Boolean).join(" · ") : "");
+  const ruleValues = (by) => (RULE_FIXED[by] ? RULE_FIXED[by].map((v) => ({ shows: 0, movies: 0, ...(opts[by] || []).find((o) => o.value.toLowerCase() === v.toLowerCase()), value: v })) : opts[by] || []);
+  const sameValue = (a, b) => (a || "").toLowerCase() === (b || "").toLowerCase();
+  const saveRules = async () => { if (await save({ auto_rules: rules.filter((r) => r.value) })) refreshPreview(); };
+  const changed = () => { saveRules(); drawRules(); };
+  const addRule = (by, value, preset) => { rules.push({ by, value, preset: preset || s.auto_preset || d.default_preset }); changed(); };
+  const valueCtl = (r) => {
+    const vals = ruleValues(r.by);
+    if (!vals.length) {  // Sonarr/Radarr not connected (or nothing tagged yet): type it
+      return h("input", { type: "text", value: r.value, placeholder: r.by === "tag" ? "tag label" : "genre", class: "rule-value",
+        onchange: (e) => { r.value = e.target.value.trim(); changed(); } });
+    }
+    return h("select", { class: "rule-value", onchange: (e) => { r.value = e.target.value; changed(); } },
+      !r.value ? h("option", { value: "", selected: true }, "choose…") : null,
+      r.value && !vals.some((o) => sameValue(o.value, r.value)) ? h("option", { value: r.value, selected: true }, `${r.value} (none right now)`) : null,
+      vals.map((o) => h("option", { value: o.value, selected: sameValue(o.value, r.value) }, o.value + (o.shows + o.movies ? ` (${o.shows + o.movies})` : ""))));
+  };
+  const ruleRow = (r, i) => {
+    const move = (by) => { [rules[i], rules[i + by]] = [rules[i + by], rules[i]]; changed(); };
+    return h("div", { class: "item rule" },
+      h("span", { class: "dim small", style: "width:42px;flex:none" }, i ? "else if" : "if"),
+      h("select", { class: "rule-by", onchange: (e) => { r.by = e.target.value; r.value = RULE_FIXED[r.by] ? RULE_FIXED[r.by][0] : ""; changed(); } },
+        Object.entries(RULE_BY).map(([v, l]) => h("option", { value: v, selected: r.by === v }, l))),
+      r.by === "source" ? null : h("span", { class: "dim small" }, "is"),
+      valueCtl(r),
+      h("span", { class: "dim" }, "→"),
+      h("select", { class: "rule-preset", onchange: (e) => { r.preset = e.target.value; saveRules(); } }, presetOpts(r.preset)),
+      h("span", { class: "meta grow" }, titles(ruleValues(r.by).find((o) => sameValue(o.value, r.value)))),
+      h("span", { class: "row", style: "gap:2px" },
+        h("button", { class: "btn sm ghost icon", title: "Move up", disabled: !i, onclick: () => move(-1) }, "↑"),
+        h("button", { class: "btn sm ghost icon", title: "Move down", disabled: i === rules.length - 1, onclick: () => move(1) }, "↓"),
+        h("button", { class: "btn sm ghost icon", title: "Remove", onclick: () => { rules.splice(i, 1); changed(); } }, "✕")));
+  };
+  const drawRules = () => {
+    rulesBox.replaceChildren(...rules.map(ruleRow));
+    const anime = (opts.type || []).find((o) => o.value === "anime");
+    const animePreset = d.presets.includes("Anime HEVC · 1800k") ? "Anime HEVC · 1800k" : d.presets.find((p) => /anime/i.test(p));
+    const errs = Object.entries(d.arr.errors || {});
+    rulesNote.replaceChildren(
+      !d.arr.sonarr && !d.arr.radarr ? h("div", { class: "dim small" }, "Rules match what Sonarr/Radarr know about a show or movie — connect them in ", h("a", { href: "#/settings" }, "Settings"), " to pick from their genres and tags.")
+        : errs.length ? h("div", { class: "amber small" }, errs.map(([k, e]) => `${k}: ${e}`).join(" · "))
+          : !d.arr.ready ? h("div", { class: "dim small" }, "Reading genres and tags from Sonarr/Radarr…") : "",
+      !rules.length ? h("div", { class: "row wrap small", style: "margin-top:6px" }, h("span", { class: "dim" }, "No rules — everything uses the preferred preset."),
+        anime && animePreset ? h("button", { class: "btn sm", onclick: () => addRule("type", "anime", animePreset) }, `Use ${animePreset} for Sonarr's ${num(anime.shows)} anime series`) : "") : "");
+  };
+  const addSel = h("select", { "aria-label": "Add a rule", onchange: (e) => {
+    const by = e.target.value;
+    e.target.value = "";
+    if (by) addRule(by, RULE_FIXED[by] ? RULE_FIXED[by][by === "source" ? 1 : 0] : (ruleValues(by)[0] || {}).value || "");
+  } }, h("option", { value: "" }, "+ Add a rule…"), Object.entries(RULE_BY).map(([v, l]) => h("option", { value: v }, l)));
+  drawRules();
 
   // thresholds
   const autoR = h("input", { type: "range", min: 5, max: 80, step: 1, value: Math.round(s.auto_threshold * 100) });
@@ -1158,7 +1221,22 @@ PAGES.automation = async (pg) => {
   const hoursOn = h("input", { type: "checkbox", checked: !!s.auto_hours });
   const from = h("input", { type: "time", value: hFrom }), to = h("input", { type: "time", value: hTo });
   const saveHours = () => save({ auto_hours: hoursOn.checked ? `${from.value || "01:00"}-${to.value || "08:00"}` : "" });
-  [hoursOn, from, to].forEach((x) => x.addEventListener("change", saveHours));
+  [hoursOn, from, to].forEach((x) => x.addEventListener("change", () => { saveHours(); drawClock(); }));
+  // the window is on the server's clock; say so, and what it is in this browser's time when they differ
+  let clock = d.clock;
+  const clockLine = h("div", { class: "small", style: "flex-basis:100%" });
+  const drawClock = () => {
+    if (!clock) return;
+    const mine = -new Date().getTimezoneOffset(), diff = mine - clock.offset;
+    const shift = (t) => {
+      const [hh, mm] = (t || "00:00").split(":").map(Number), x = (((hh * 60 + mm + diff) % 1440) + 1440) % 1440;
+      return `${String(Math.floor(x / 60)).padStart(2, "0")}:${String(x % 60).padStart(2, "0")}`;
+    };
+    clockLine.replaceChildren(h("span", { class: "dim" }, `Server clock: ${clock.now} ${clock.zone || clock.abbr} (${fmtOffset(clock.offset)})`),
+      diff && hoursOn.checked ? h("span", { class: "muted" }, ` — that's ${shift(from.value)}–${shift(to.value)} in your time (${fmtOffset(mine)})`) : "",
+      diff && !clock.offset && clock.container ? h("div", { class: "amber" }, "The container is running on UTC. Mount /etc/localtime (see compose.yaml) or set TZ and restart it, so it follows this server's timezone.") : "");
+  };
+  drawClock();
   const sweepN = h("input", { type: "number", min: 1, value: s.sweep_hours, onchange: (e) => save({ sweep_hours: Number(e.target.value) || 24 }) });
   const holdN = h("input", { type: "number", min: 1, value: s.auto_hold_max, onchange: (e) => save({ auto_hold_max: Number(e.target.value) || 10 }) });
   const exclBox = h("div", { class: "list" }), exclMeta = meta("");
@@ -1189,15 +1267,20 @@ PAGES.automation = async (pg) => {
       a.log.length > logN ? h("button", { class: "btn ghost sm", style: "align-self:flex-start;margin:6px 10px 0", onclick: () => { logN += 50; drawSide(a); } }, "Show more") : "");
     statusLine.textContent = a.status;
     lastSweep.textContent = a.last_sweep ? `last ${ago(a.last_sweep)}` : "never";
+    clock = a.clock || clock;
+    drawClock();
   };
   const lastSweep = h("span", { class: "dim small" });
 
   pg.el.append(pageHead("Automation", "Keeps the library optimized on its own — one file at a time, so the NAS and your scratch disk never get flooded."),
     h("div", { style: "padding-bottom:18px" }, h("div", { class: "mode-bar" }, seg, h("span", { class: "row small", style: "gap:6px" }, modeDot, statusLine)), help),
+    sec(secHead("Which preset", addSel),
+      fields(fieldRow("Preferred preset", "for everything no rule below matches", prefSel)),
+      h("h3", { style: "margin:16px 0 4px" }, "Rules"),
+      h("p", { class: "lead", style: "margin:0 0 8px" }, "Use another preset for some shows or movies, by their Sonarr series type, genre or tag. The first rule that matches wins."),
+      rulesBox, rulesNote),
     sec("What gets encoded",
       fields(
-        fieldRow("Preferred preset", "used for everything", prefSel),
-        fieldRow("Anime preset", d.arr.sonarr ? "for series Sonarr marks as anime" : "needs Sonarr connected (Settings)", animeSel),
         fieldRow("Replace automatically", "when the estimated saving is at least", h("div", { class: "slider-row" }, autoR, autoV)),
         fieldRow("Ask me first", "when it's at least", h("div", { class: "slider-row" }, revR, revV))),
       h("div", { style: "margin-top:14px" }, outcome),
@@ -1208,7 +1291,7 @@ PAGES.automation = async (pg) => {
     sec(secHead("Up next", queueMeta), queueBox),
     sec("Pacing", fields(
       fieldRow("Copy ahead", "copy the next file while the current one encodes — at most one waiting", h("label", { class: "check" }, prefetch, "on")),
-      fieldRow("Working hours", "only start new files in this window", h("label", { class: "check" }, hoursOn, "only between"), from, "and", to),
+      fieldRow("Working hours", "only start new files in this window, on the server's clock", h("label", { class: "check" }, hoursOn, "only between"), from, "and", to, clockLine),
       fieldRow("Look for new files", "re-lists folders (cheap); only new or changed files are read", "every", sweepN, "hours", sweepBtn, lastSweep),
       fieldRow("Waiting for your OK", "stop encoding when this many automatic encodes wait in Review", "at most", holdN))),
     sec(secHead("Left alone", exclMeta),
@@ -1221,7 +1304,7 @@ PAGES.automation = async (pg) => {
         h("li", {}, "In Sonarr/Radarr: ", h("b", {}, "Settings → Connect → + → Webhook")),
         h("li", {}, "Paste the URL, method ", h("b", {}, "POST"), ", triggers ", h("b", {}, "On Import"), " and ", h("b", {}, "On Upgrade")),
         h("li", {}, "Press ", h("b", {}, "Test"), " — it shows up in Activity below")),
-      !d.arr.sonarr && !d.arr.radarr ? h("p", { class: "amber small", style: "margin-top:10px" }, "Also add their URL + API key in ", h("a", { href: "#/settings" }, "Settings"), " so recast can map their paths to yours, spot anime, and trigger a rescan after replacing.") : ""),
+      !d.arr.sonarr && !d.arr.radarr ? h("p", { class: "amber small", style: "margin-top:10px" }, "Also add their URL + API key in ", h("a", { href: "#/settings" }, "Settings"), " so recast can map their paths to yours, match preset rules, and trigger a rescan after replacing.") : ""),
     sec("Activity", logBox));
   drawSide(d);
   drawExcl(d.excluded);

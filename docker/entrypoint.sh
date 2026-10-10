@@ -3,6 +3,8 @@
 # owner as Sonarr/Radarr's, with access to the GPU's render node for hardware encoding.
 set -e
 umask "${UMASK:-002}"
+# An empty TZ means UTC to the C library; unset it so the mounted /etc/localtime (the host's zone) applies.
+[ -n "${TZ:-}" ] || unset TZ
 
 if [ "$(id -u)" = "0" ] && [ "${PUID:-0}" != "0" ]; then
     groups="${PGID}"

@@ -59,6 +59,11 @@ def run(host: str, port: int) -> None:
         seed_from_env(cfg)
         svc = Service(cfg)
         log.info("recast-server · config in %s", config_dir())
+        from ..automation import server_clock
+        c = server_clock()
+        off = c["offset"]
+        log.info("clock · %s %s (UTC%s%02d:%02d) — working hours use this", c["now"], c["zone"] or c["abbr"],
+                 "-" if off < 0 else "+", abs(off) // 60, abs(off) % 60)
         if host not in ("127.0.0.1", "localhost", "::1") and not cfg.web_password_hash:
             log.warning("reachable from your network without a password — set one in Settings → Security")
         shown = "localhost" if host in ("0.0.0.0", "::") else host

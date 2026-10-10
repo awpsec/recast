@@ -335,7 +335,8 @@ async def _state(request):
                 "presets": list(svc.presets), "default_preset": svc.cfg.default_preset,
                 "hevc_encoder": resolve_encoder(EncodeSettings(), svc.cfg.encoders)[0] if svc.cfg.encoders else "",
                 "protected": bool(svc.cfg.web_password_hash), "exposed": exposed,
-                "potential": sum(s.saves for r in svc.cfg.roots for s in svc.scanner.stats.get(r.path, []))})
+                "potential": sum(s.saves for r in svc.cfg.roots for s in svc.scanner.stats.get(r.path, [])),
+                "scanned": bool(svc.scanner.stats)})
 
 
 # ── library ──

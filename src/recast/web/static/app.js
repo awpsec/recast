@@ -370,8 +370,13 @@ function nowView(box, emptyFn) {
   return (jobs) => {
     jobs = jobs.filter((j) => j.stage !== "queued");
     for (const [id, b] of blocks) if (!jobs.find((j) => j.id === id)) { b.el.remove(); blocks.delete(id); }
-    if (!jobs.length) { if (!box.querySelector(".empty")) box.replaceChildren(emptyFn()); return; }
+    if (!jobs.length) {  // redraw the empty state only when its text changes (keeps its links clickable)
+      const node = emptyFn();
+      if (box._empty !== node.textContent) { box.replaceChildren(node); box._empty = node.textContent; }
+      return;
+    }
     box.querySelector(".empty")?.remove();
+    box._empty = null;
     for (const j of jobs) {
       let b = blocks.get(j.id);
       if (!b) {
@@ -438,7 +443,8 @@ PAGES.dashboard = async (pg) => {
     const need = l.inbox + l.review;
     tiles.replaceChildren(
       tile("Space saved", fsize(l.saved), n ? `${num(n)} files re-encoded` : "nothing replaced yet", "green", "#/history"),
-      tile("Could still free", info.potential ? fsize(info.potential) : "—", info.potential ? `with ${info.default_preset}` : "scan the library to see", "", "#/library"),
+      tile("Could still free", info.potential ? fsize(info.potential) : info.scanned ? "0" : "—",
+        info.potential ? `with ${info.default_preset}` : info.scanned ? "nothing left worth encoding" : "scan the library to see", "", "#/library"),
       tile("Automation", ml, l.automation.mode === "off" ? "turn it on to keep the library optimized" : l.automation.status, mc, "#/automation"),
       tile("Needs you", String(need), need ? `${l.inbox} to approve · ${l.review} borderline` : "nothing waiting", need ? "amber" : "", "#/review"));
   };

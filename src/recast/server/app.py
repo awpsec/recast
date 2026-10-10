@@ -717,14 +717,21 @@ AUTO_KEYS = ("auto_mode", "auto_preset", "auto_preset_anime", "auto_threshold", 
 
 
 def _hook_urls(request) -> dict:
+    """Webhook URLs as reachable from Sonarr/Radarr: the address the browser used to open recast (in Docker
+    the server's own idea of its IP is a container-internal one), unless that was localhost."""
     svc: Service = request.app["svc"]
-    host = request.app["host"]
-    if host in ("0.0.0.0", "::", ""):
-        try:
-            host = socket.gethostbyname(socket.gethostname())
-        except OSError:
-            host = socket.gethostname()
-    base = f"http://{host}:{request.app['port']}/api/hook"
+    host = request.host or ""
+    name = host.rsplit(":", 1)[0].strip("[]") if host.count(":") <= 1 or host.startswith("[") else host
+    if not host or name in ("localhost", "127.0.0.1", "::1"):
+        bind = request.app["host"]
+        if bind in ("0.0.0.0", "::", ""):
+            try:
+                bind = socket.gethostbyname(socket.gethostname())
+            except OSError:
+                bind = socket.gethostname()
+        host = f"{bind}:{request.app['port']}"
+    scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
+    base = f"{scheme}://{host}/api/hook"
     return {k: f"{base}/{k}?token={svc.cfg.webhook_token}" for k in ("sonarr", "radarr")}
 
 

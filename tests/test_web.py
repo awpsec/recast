@@ -105,6 +105,8 @@ async def test_automation_settings_and_preview(client, svc):
     assert p["auto"] == 0 and p["review"] == 2
     a = await ok(await client.get("/api/automation"))
     assert a["hooks"]["sonarr"].endswith("token=" + svc.cfg.webhook_token)
+    a = await ok(await client.get("/api/automation", headers={"Host": "zeddserver:8484"}))
+    assert a["hooks"]["radarr"].startswith("http://zeddserver:8484/api/hook/radarr?token=")  # what Sonarr can reach
     assert len(a["queue"]) == 2 and not svc.engine.jobs   # dry run: nothing was started
     d = await ok(await client.put("/api/automation", json={"auto_mode": "ask", "auto_hold_max": 3}))
     assert svc.cfg.auto_mode == "ask" and svc.cfg.auto_hold_max == 3

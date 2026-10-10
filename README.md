@@ -52,7 +52,7 @@ library headers once (cached after that), and ranks every show by how much space
 docker compose pull && docker compose up -d
 ```
 
-The web app shows when a new release is out (sidebar and Settings). Your settings, queue and history
+The web app shows when a new release is out (top bar and Settings). Your settings, queue and history
 live in `CONFIG_DIR` and carry over. To pin a version, set `RECAST_TAG=0.2.0` in `.env`
 (`edge` follows the main branch).
 

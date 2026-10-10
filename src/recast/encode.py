@@ -412,6 +412,22 @@ def skip_reason(s: EncodeSettings, m: "MediaInfo", caps: dict[str, EncoderCap]) 
     return ""
 
 
+def quality_loss(s: EncodeSettings, m: "MediaInfo") -> str:
+    """What this preset would take away from the file beyond bitrate ("" = nothing): resolution, HDR, surround.
+    Automation never does these on its own — they go to review."""
+    if s.codec == "copy":
+        return ""
+    if s.resolution != "source" and m.height > int(s.resolution) * 1.1:
+        return f"would downscale {m.res} → {s.resolution}p"
+    if m.hdr == "Dolby Vision":
+        return "would drop Dolby Vision"
+    if m.hdr and not (s.hdr and ten_bit(s, m)):
+        return f"would drop {m.hdr}"
+    if s.audio == "aac_stereo" and any(a.get("channels", 2) > 2 for a in m.audio):
+        return "would downmix surround to stereo"
+    return ""
+
+
 def already_target(s: EncodeSettings, m: "MediaInfo", caps: dict[str, EncoderCap]) -> bool:
     return bool(skip_reason(s, m, caps))
 

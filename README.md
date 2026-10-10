@@ -134,6 +134,10 @@ Safety valve: an automatic encode only replaces the original if the *real* savin
 your bar and every check passes (duration, streams, size, decode test). Otherwise it waits in
 Review with a note saying why. Originals go to recast's trash, so History can undo it.
 
+Files your preset would take something else from — 4K down to 1080p, HDR or Dolby Vision, surround
+sound — are never automatic, however big the saving. They wait in Review, grouped by reason, so
+you can encode or skip a whole group at once.
+
 **Pacing** — the point is a library that gets better overnight without a hammered NAS or a full
 scratch disk:
 

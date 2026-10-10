@@ -955,27 +955,45 @@ PAGES.review = async (pg) => {
       h("button", { class: "btn go", onclick: async () => { if (await act(() => post(`/api/inbox/batch/${b.id}/approve`))) { toast("Approved — files are replaced as they finish.", "green"); load(); } } }, b.active ? "Approve all (incl. the rest)" : "Replace all"),
       h("button", { class: "btn danger", onclick: async () => { if (await confirmBox("Discard the whole batch?", "Encoded files are deleted from scratch; the library stays as it is.", "Discard", "danger") && await act(() => post(`/api/inbox/batch/${b.id}/deny`))) load(); } }, "Discard all")));
 
+  let reason = null;  // null = every borderline file; otherwise one group
+  const reasonLabel = (r, s) => r || `saving between ${pct(s.review_threshold)} and ${pct(s.auto_threshold)}`;
   async function load() {
-    const [ib, a] = await Promise.all([api("/api/inbox"), api("/api/automation")]);
+    const [ib, a] = await Promise.all([api("/api/inbox"), api("/api/automation" + (reason == null ? "" : "?reason=" + enc(reason)))]);
     if (!pg.alive) return;
     inboxBox.replaceChildren(...(ib.items.length ? ib.items.map((it) => (it.kind === "batch" ? batchItem(it) : jobItem(it)))
       : [h("div", { class: "empty" }, "Nothing waiting for approval.")]));
     const s = a.settings;
-    if (!a.review.length) {
+    const groups = Object.entries(a.review_reasons || {}).sort((x, y) => y[1] - x[1]);
+    const all = groups.reduce((n, g) => n + g[1], 0);
+    if (reason != null && !groups.find((g) => g[0] === reason)) { reason = null; return load(); }
+    if (!all) {
       borderBox.replaceChildren(h("div", { class: "empty" }, s.auto_mode === "off" ? "Automation is off — borderline files show up here when it runs." : "No borderline files."));
     } else {
+      const shown = a.review_total;
       borderBox.replaceChildren(
-        h("p", { class: "muted", style: "margin:6px 0 10px" }, `Estimated saving between ${pct(s.review_threshold)} and ${pct(s.auto_threshold)}. Encode the ones you care about; skipped files stay skipped until they change.`),
+        h("p", { class: "muted", style: "margin:6px 0 10px" }, "Automation won't touch these on its own. Encode the ones you want; skipped files stay skipped until they change."),
+        h("div", { class: "row wrap", style: "margin-bottom:12px" },
+          h("div", { class: "chips grow" },
+            h("button", { class: "chip" + (reason == null ? " on" : ""), onclick: () => { reason = null; load(); } }, `All ${num(all)}`),
+            groups.map(([r, n]) => h("button", { class: "chip" + (reason === r ? " on" : ""), onclick: () => { reason = r; load(); } }, `${reasonLabel(r, s)} · ${num(n)}`))),
+          h("button", { class: "btn sm danger", onclick: async () => {
+            const what = reason == null ? `all ${num(all)} borderline files` : `the ${num(shown)} files that ${reasonLabel(reason, s).replace(/^would /, "would ")}`;
+            if (!(await confirmBox("Skip these?", `Skip ${what}. They stay skipped until the file changes (e.g. an upgrade).`, "Skip them", "danger"))) return;
+            const r = await act(() => post("/api/automation/review/skip-all", { reason }));
+            if (r) { toast(`Skipped ${num(r.skipped)}`, "", 3000); reason = null; load(); }
+          } }, reason == null ? "Skip all" : `Skip these ${num(shown)}`)),
         h("div", { class: "table-wrap" }, h("table", { class: "table" },
           h("thead", {}, h("tr", {}, h("th", {}, "File"), h("th", { class: "num" }, "Est. saving"), h("th", { class: "num hide-sm" }, "Now → after"), h("th", { class: "hide-sm" }, "Preset"), h("th", {}))),
           h("tbody", {}, a.review.map((p) => h("tr", {},
-            h("td", { class: "name" }, h("div", { class: "trunc" }, base(p.path)), h("div", { class: "sub trunc" }, parentName(p.path))),
+            h("td", { class: "name" }, h("div", { class: "trunc" }, base(p.path)),
+              h("div", { class: "sub trunc" }, parentName(p.path), p.reason ? h("span", { class: "amber" }, " · " + p.reason) : "")),
             h("td", { class: "num amber" }, "−" + pct(p.pct)),
             h("td", { class: "num hide-sm nowrap" }, `${fsize(p.size)} → ${fsize(p.est_out)}`),
             h("td", { class: "hide-sm muted trunc", style: "max-width:200px" }, p.preset),
             h("td", { class: "right nowrap" },
               h("button", { class: "btn sm", onclick: async () => { if (await act(() => post("/api/automation/review/encode", { path: p.path }), "Queued")) load(); } }, "Encode"),
-              h("button", { class: "btn sm ghost", onclick: async () => { if (await act(() => post("/api/automation/review/skip", { path: p.path }))) load(); } }, "Skip"))))))));
+              h("button", { class: "btn sm ghost", onclick: async () => { if (await act(() => post("/api/automation/review/skip", { path: p.path }))) load(); } }, "Skip"))))))),
+        shown > a.review.length ? h("div", { class: "dim", style: "text-align:center;margin-top:10px;font-size:12.5px" }, `Showing the ${a.review.length} biggest of ${num(shown)}.`) : "");
     }
     counts = `${(S.live || {}).inbox}|${(S.live || {}).review}`;
   }
@@ -1096,7 +1114,8 @@ PAGES.automation = async (pg) => {
             outcome,
             h("p", { class: "dim", style: "font-size:12.5px;margin:10px 0 0" },
               "The score is the estimated saving with your preset (measured from real encodes of the same show once there are some). ",
-              "An automatic encode only replaces the original if the ", h("i", {}, "real"), " saving also clears the bar and every check passes; otherwise it waits in Review."))),
+              "An automatic encode only replaces the original if the ", h("i", {}, "real"), " saving also clears the bar and every check passes; otherwise it waits in Review. ",
+              "Files your preset would downscale, or strip of HDR or surround sound, always wait in Review."))),
         card("Pacing",
           fieldRow("Copy ahead", "copy the next file while the current one encodes — at most one waiting", h("label", { class: "check" }, prefetch, "on")),
           fieldRow("Working hours", "only start new files in this window", h("label", { class: "check" }, hoursOn, "only between"), from, "and", to),

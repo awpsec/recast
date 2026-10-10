@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 
 from .config import config_dir
-from .encode import already_target, est_bytes
+from .encode import already_target, est_bytes, quality_loss
 from .probe import VIDEO_EXT, MediaInfo
 
 
@@ -80,12 +80,8 @@ def list_files(root: str, progress=None, cancelled=lambda: False) -> list[tuple[
 
 
 def keeps_quality(s, ms: list[MediaInfo]) -> bool:
-    """Would this preset keep these files' resolution and surround sound? ("auto" only recommends those.)"""
-    if s.resolution != "source" and any(m.height > int(s.resolution) for m in ms):
-        return False
-    if s.audio == "aac_stereo" and any(a.get("channels", 2) > 2 for m in ms for a in m.audio):
-        return False
-    return True
+    """Would this preset keep these files' resolution, HDR and surround sound? ("best of all" only picks those.)"""
+    return not any(quality_loss(s, m) for m in ms)
 
 
 def pretty_title(name: str) -> str:

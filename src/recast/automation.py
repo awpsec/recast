@@ -7,6 +7,9 @@ real encodes of that show when there are any):
     review ≤ score < auto     → "review" list, decided by you before anything is encoded
     score < review_threshold  → skipped (remembered until the file changes)
 
+A file the preset would lose something on besides bitrate (4K → 1080p, HDR, surround) is never
+automatic: however big the saving, it goes to review.
+
 Pacing: automation never creates more than one running job plus one queued behind it (so the next
 copy overlaps the current encode). Each file is read from the NAS once, sequentially, and written
 back once. A whole library trickles through instead of flooding scratch.
@@ -21,7 +24,7 @@ from dataclasses import replace
 from datetime import datetime
 
 from .config import config_dir
-from .encode import EncodeSettings, est_bytes, skip_reason
+from .encode import EncodeSettings, est_bytes, quality_loss, skip_reason
 from .engine import ACTIVE, norm, show_root
 
 
@@ -94,8 +97,11 @@ class Automation:
         out = m.size * meas[0] if meas else est_bytes(s, m, cfg.encoders)
         pct = 1 - out / max(1, m.size)
         verdict = "auto" if pct >= auto_t else "review" if pct >= review_t else "skip"
-        return {**plan, "est_out": out, "pct": pct, "measured": bool(meas), "verdict": verdict,
-                "reason": "" if verdict != "skip" else f"would save only {pct * 100:.0f}%"}
+        reason = "" if verdict != "skip" else f"would save only {pct * 100:.0f}%"
+        loss = quality_loss(s, m) if verdict == "auto" else ""
+        if loss:  # a big saving that costs resolution/HDR/surround is your call, not automation's
+            verdict, reason = "review", loss
+        return {**plan, "est_out": out, "pct": pct, "measured": bool(meas), "verdict": verdict, "reason": reason}
 
     def rebuild(self) -> dict:
         """Re-score everything the scanner knows (cheap: cached headers). Keeps your own skips."""
@@ -255,6 +261,14 @@ class Automation:
         j.origin, j.auto_min_saving = "review", self.svc.cfg.review_threshold
         self.note("encode", path, preset=name, pct=p["pct"], reviewed=True, job=j.id)
         return j.id
+
+    def skip_many(self, reason: str | None = None) -> int:
+        """Skip every borderline file (or only those with this reason; "" = the plain 'saving in between' ones)."""
+        with self._lock:
+            paths = [p for p, v in self.review.items() if reason is None or v.get("reason", "") == reason]
+        for p in paths:
+            self.skip_review(p)
+        return len(paths)
 
     def skip_review(self, path: str) -> None:
         with self._lock:

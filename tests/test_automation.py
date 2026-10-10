@@ -167,3 +167,25 @@ async def test_replaced_files_drop_out_and_upgrades_come_back(svc):
     svc.scanner.scan(svc.cfg.roots[0].path, relist=True)
     svc.automation.rebuild()
     assert final in [p["path"] for p in svc.automation.queue]         # fair game again
+
+
+def test_quality_loss_is_never_automatic(svc):
+    from dataclasses import replace
+
+    from recast.encode import quality_loss
+    svc.automation.rebuild()
+    big = svc.probes.get(svc.automation.queue[0]["path"])
+    s = FAST
+    assert quality_loss(s, big) == ""
+    assert quality_loss(replace(s, resolution="480"), big) == "would downscale 720p → 480p"
+    assert quality_loss(s, replace(big, hdr="Dolby Vision")) == "would drop Dolby Vision"
+    assert quality_loss(replace(s, bit_depth="8"), replace(big, hdr="HDR10")) == "would drop HDR10"
+    assert quality_loss(replace(s, audio="aac_stereo"), replace(big, audio=[{"channels": 6}])) == \
+        "would downmix surround to stereo"
+    save_preset("Tiny", "", replace(FAST, resolution="480"))
+    svc.reload_presets()
+    svc.cfg.auto_preset = "Tiny"
+    svc.automation.reset_decisions()
+    assert not svc.automation.queue and len(svc.automation.review) == 5   # huge saving, still your call
+    assert {p["reason"] for p in svc.automation.review.values()} == {"would downscale 720p → 480p"}
+    assert svc.automation.skip_many("would downscale 720p → 480p") == 5 and not svc.automation.review

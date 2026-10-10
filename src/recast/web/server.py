@@ -206,6 +206,7 @@ def create_app(svc: Service, host: str = "127.0.0.1", port: int = 8484) -> web.A
     r.add_get("/api/automation", _automation)
     r.add_put("/api/automation", _automation_put)
     r.add_get("/api/automation/preview", _automation_preview)
+    r.add_post("/api/automation/review/skip-all", _skip_all)
     r.add_post("/api/automation/review/{action}", _review_action)
     r.add_post("/api/automation/sweep", _sweep)
     r.add_post("/api/hook/{kind}", _hook)
@@ -688,9 +689,15 @@ async def _automation(request):
     cfg = svc.cfg
     taken = svc.engine.busy_paths() | svc.engine.done_paths()
     queue = [p for p in a.queue if norm(p["path"]) not in taken]
+    reasons: dict[str, int] = {}
+    for p in list(a.review.values()):
+        reasons[p.get("reason", "")] = reasons.get(p.get("reason", ""), 0) + 1
+    want = request.query.get("reason")
+    review = [p for p in list(a.review.values()) if want is None or p.get("reason", "") == want]
     return _ok({"settings": {k: getattr(cfg, k) for k in AUTO_KEYS}, "status": a.status, "counts": a.counts,
                 "queue": queue[:30], "queue_total": len(queue),
-                "review": sorted(a.review.values(), key=lambda p: -(p["size"] - p["est_out"]))[:300],
+                "review": sorted(review, key=lambda p: -(p["size"] - p["est_out"]))[:300],
+                "review_total": len(review), "review_reasons": reasons,
                 "log": a.log[-150:][::-1], "last_sweep": a.last_sweep, "pending": a.pending,
                 "hooks": _hook_urls(request), "presets": list(svc.presets), "default_preset": cfg.default_preset,
                 "arr": {"sonarr": cfg.sonarr.enabled, "radarr": cfg.radarr.enabled}})
@@ -738,6 +745,13 @@ async def _review_action(request):
         return _ok(job=jid) if jid else _err("couldn't start that one")
     svc.automation.skip_review(path)
     return _ok()
+
+
+async def _skip_all(request):
+    svc: Service = request.app["svc"]
+    body = await request.json()
+    n = await asyncio.to_thread(svc.automation.skip_many, body.get("reason"))
+    return _ok(skipped=n)
 
 
 async def _sweep(request):
@@ -1025,6 +1039,7 @@ async def _service_loop(app):
         if svc.automation.sweep_due():
             _spawn(app, _run_sweep(app), "sweep")
         await asyncio.to_thread(svc.engine.clean_scratch)
+        await asyncio.to_thread(svc.engine.purge_trash)
     n = 0
     while True:
         try:
@@ -1041,6 +1056,8 @@ async def _service_loop(app):
                     svc.automation.save()
                 if n % 14400 == 0 and n and svc.arr:
                     _spawn(app, asyncio.to_thread(svc.arr.refresh), "arr")
+                if n % 345600 == 0 and n:  # daily
+                    _spawn(app, asyncio.to_thread(svc.engine.purge_trash), "trash")
             if n % 4 == 0 and app["clients"]:
                 _broadcast(app, live_state(svc))
         except Exception:  # noqa: BLE001 — keep the daemon alive; the error is printed

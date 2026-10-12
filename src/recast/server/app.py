@@ -23,12 +23,13 @@ from aiohttp import web
 
 from ..arr import ArrClient, ArrError, auto_map
 from ..config import Root, config_dir, default_scratch, is_network_path, machine_summary, suggest_libraries
-from ..encode import (CODEC_LABEL, SCHEMA, EncodeSettings, already_target, bitrate_word, crf_word, delete_preset,
-                      est_bytes, est_fps, resolve_encoder, save_preset, skip_reason)
+from ..encode import (CODEC_LABEL, CRF_SCALE, ENCODERS, SCHEMA, EncodeSettings, already_target, bitrate_word,
+                      build_command, crf_word, delete_preset, est_bytes, est_fps, quote, resolve_encoder, save_preset,
+                      skip_reason)
 from ..automation import MODES, RULE_BY, server_clock
 from ..engine import ACTIVE, LIVE, Batch, Job, norm
 from ..overview import duplicate_groups, pretty_title
-from ..probe import VIDEO_EXT
+from ..probe import VIDEO_EXT, MediaInfo
 from ..service import Service
 
 log = logging.getLogger("recast")
@@ -225,6 +226,7 @@ def create_app(svc: Service, host: str = "127.0.0.1", port: int = 8484, auto_det
     r.add_put("/api/presets", _preset_put)
     r.add_delete("/api/presets", _preset_delete)
     r.add_post("/api/presets/default", _preset_default)
+    r.add_post("/api/presets/preview", _preset_preview)
     r.add_get("/api/settings", _settings)
     r.add_put("/api/settings", _settings_put)
     r.add_post("/api/arr/{kind}/test", _arr_test)
@@ -909,11 +911,66 @@ async def _hook(request):
 # ── presets ──
 async def _presets(request):
     svc: Service = request.app["svc"]
-    schema = {k: {"doc": f.doc, "options": [o.value for o in f.options(svc.cfg.encoders)],
-                  "bad": [o.value for o in f.options(svc.cfg.encoders) if not o.ok]} for k, f in SCHEMA.items()}
-    return _ok(presets=[{"name": n, "description": d, "settings": asdict(s), "default": n == svc.cfg.default_preset,
-                         "encoder": resolve_encoder(s, svc.cfg.encoders)[0]} for n, (d, s) in svc.presets.items()],
-               schema=schema)
+    cfg = svc.cfg
+    schema = {}
+    for k, f in SCHEMA.items():
+        opts = f.options(cfg.encoders)
+        schema[k] = {"doc": f.doc, "options": [o.value for o in opts], "bad": [o.value for o in opts if not o.ok],
+                     "labels": {str(o.value): o.desc for o in opts if o.desc}}
+    done: dict[str, list[int]] = {}  # preset → [files, bytes before, bytes after] it actually replaced
+    for x in svc.engine.history:
+        if x.get("src_size") and x.get("out_size") and not x.get("restored"):
+            t = done.setdefault(x.get("preset", ""), [0, 0, 0])
+            t[0], t[1], t[2] = t[0] + 1, t[1] + x["src_size"], t[2] + x["out_size"]
+
+    def row(n: str, d: str, s: EncodeSettings) -> dict:
+        files, before, after = done.get(n, (0, 0, 0))
+        return {"name": n, "description": d, "settings": asdict(s), "default": n == cfg.default_preset,
+                "encoder": resolve_encoder(s, cfg.encoders)[0],
+                "uses": (["default for new encodes"] if n == cfg.default_preset else [])
+                + _preset_uses(cfg, n, default_counts=True),
+                "done": {"files": files, "src": before, "out": after}}
+    return _ok(presets=[row(n, d, s) for n, (d, s) in svc.presets.items()], schema=schema,
+               defaults=asdict(EncodeSettings()), encoders=ENCODERS)
+
+
+# What the preset page shows the command for: a typical episode, so every option has something to act on.
+_SAMPLE = MediaInfo(path="Show - S01E01.mkv", size=1_400_000_000, duration=1420.0, container="matroska", codec="H.264",
+                    codec_name="h264", profile="High", width=1920, height=1080, fps=23.976, frames=34046, vkbps=7200,
+                    pix_fmt="yuv420p",
+                    audio=[{"lang": "eng", "codec": "truehd", "channels": 8, "layout": "7.1", "kbps": 3000,
+                            "title": "", "default": True},
+                           {"lang": "jpn", "codec": "aac", "channels": 2, "layout": "stereo", "kbps": 192,
+                            "title": "", "default": False}],
+                    subs=[{"lang": "eng", "codec": "subrip", "forced": False, "title": ""},
+                          {"lang": "eng", "codec": "hdmv_pgs_subtitle", "forced": True, "title": "Signs"}])
+
+
+async def _preset_preview(request):
+    """The ffmpeg command a preset runs (for a typical 1080p episode) and how its bitrate/CRF reads in words."""
+    svc: Service = request.app["svc"]
+    body = await request.json()
+    try:
+        s = EncodeSettings.from_dict({**asdict(EncodeSettings()), **(body.get("settings") or {})})
+    except (ValueError, TypeError) as e:
+        return _err(str(e))
+    m = _SAMPLE
+    groups = build_command(s, m, m.path, "Show - S01E01 (recast)." + s.container, svc.cfg.encoders)
+    groups = [g for g in groups if g and g[0] != "-progress"  # recast's own plumbing, not the preset's doing
+              and not all(x.startswith("-metadata:s:") or x.endswith("=") for x in g)]
+    enc, note = resolve_encoder(s, svc.cfg.encoders)
+    codec = s.codec if s.codec in CRF_SCALE else "hevc"
+    name, top = CRF_SCALE[codec]
+    height = int(s.resolution) if str(s.resolution).isdigit() else m.height
+    quality, problem = "", ""
+    if s.codec != "copy" and s.rate_mode == "crf":
+        quality = crf_word(codec, s.crf) if 0 <= s.crf <= top else ""
+        problem = "" if 0 <= s.crf <= top else f"{name} quality goes from 0 to {top}"
+    elif s.codec != "copy":
+        quality = bitrate_word(codec, s.bitrate, height * 16 // 9, height, m.fps) + f" for {height}p"
+        problem = "" if 100 <= s.bitrate <= 200000 else "between 100 and 200000 kb/s"
+    return _ok(lines=[" ".join(quote(t, False) for t in g) for g in groups], encoder=enc,
+               encoder_note="" if note == "auto" else note, quality=quality, problem=problem, crf_top=top)
 
 
 async def _preset_put(request):

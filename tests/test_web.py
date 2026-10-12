@@ -260,3 +260,18 @@ async def test_webhook_button(client, svc, fake_arr):  # noqa: F811
     FakeArr.hooks, FakeArr.reject = [], True
     r = await client.post("/api/arr/sonarr/webhook")
     assert r.status == 400 and "couldn't reach recast" in (await r.json())["error"]
+
+
+async def test_preset_page_explains_itself(client, svc):
+    d = await ok(await client.get("/api/presets"))
+    fast = next(p for p in d["presets"] if p["name"] == "Test fast")
+    assert fast["uses"] == ["default for new encodes", "automation's preferred preset"] and fast["done"]["files"] == 0
+    assert d["defaults"]["codec"] == "hevc" and "libx265" in d["encoders"]["hevc"]
+    assert d["schema"]["codec"]["labels"]["av1"].startswith("AV1")      # every choice has a plain-words description
+    p = await ok(await client.post("/api/presets/preview", json={"settings": {"codec": "hevc", "bitrate": 12000,
+                                                                              "resolution": "2160"}}))
+    assert any("-b:v 12000k" in line for line in p["lines"]) and not any("-progress" in x for x in p["lines"])
+    assert p["quality"].endswith("for 2160p") and not p["problem"]
+    p = await ok(await client.post("/api/presets/preview", json={"settings": {"rate_mode": "crf", "crf": 80}}))
+    assert p["problem"] and not p["quality"]                                # out of range: said in words, not a crash
+    assert (await client.post("/api/presets/preview", json={"settings": {"nope": 1}})).status == 400

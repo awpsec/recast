@@ -316,16 +316,20 @@ function onEvent(m) {
 // ───────────────────────────── router ─────────────────────────────
 const PAGES = {};
 async function route() {
+  if (S.stayHere) { S.stayHere = false; return; }  // the hash put back after "keep editing"
   const [p, qs] = location.hash.replace(/^#\/?/, "").split("?");
   let id = p || "dashboard";
   if (S.info.needs_setup && id !== "setup") { location.hash = "#/setup"; return; }
   if (!PAGES[id]) id = "dashboard";
+  if (S.page && S.page.alive && S.page.leave && !(await S.page.leave())) {  // unsaved changes there
+    S.stayHere = true; location.hash = S.page.hash; return;
+  }
   if (S.page) { S.page.alive = false; S.page.timers.forEach(clearInterval); }
   $$(".nav a").forEach((a) => a.classList.toggle("on", a.dataset.id === (id === "browse" ? "library" : id)));
   const el = $("#page") || h("div");  // setup draws over the whole window
   el.replaceChildren();
   const pg = {
-    id, el, params: new URLSearchParams(qs || ""), timers: [], alive: true,
+    id, el, hash: location.hash, params: new URLSearchParams(qs || ""), timers: [], alive: true,
     every(ms, fn) { this.timers.push(setInterval(() => { if (this.alive) fn(); }, ms)); },
   };
   S.page = pg;
@@ -801,10 +805,7 @@ function fileDetails(d, box, pg) {
 }
 
 // ───────────────────────────── encode dialog ─────────────────────────────
-const OVERRIDES = [
-  ["rate_mode", "Rate control"], ["bitrate", "Bitrate (kb/s)"], ["crf", "Quality (CRF)"], ["resolution", "Max resolution"],
-  ["audio", "Audio"], ["bit_depth", "Pixel format"], ["speed", "Speed"], ["two_pass", "Two-pass"],
-];
+const OVERRIDES = ["rate_mode", "bitrate", "crf", "resolution", "audio", "bit_depth", "speed", "two_pass"];
 
 async function encodeModal(path, isFolder, presetName, files) {
   const P = await getPresets();
@@ -821,12 +822,13 @@ async function encodeModal(path, isFolder, presetName, files) {
     const set = (val) => { overrides[key] = val; drawAdv(); estimate(); };
     if (typeof v === "boolean") return h("label", { class: "check", style: "height:32px" }, h("input", { type: "checkbox", checked: v, onchange: (e) => set(e.target.checked) }), "on");
     if (typeof v === "number") return h("input", { type: "number", value: v, step: key === "bitrate" ? 100 : 1, onchange: (e) => set(Number(e.target.value)) });
-    return h("select", { onchange: (e) => set(e.target.value) }, sch.options.map((o) => h("option", { value: o, selected: String(o) === String(v) }, o)));
+    const opts = (SET[key] && SET[key].opts ? optKeys(key) : sch.options.map(String));
+    return h("select", { onchange: (e) => set(e.target.value) }, opts.map((o) => h("option", { value: o, selected: o === String(v) }, optLabel(key, o))));
   }
   function drawAdv() {
     const s = settings();
-    adv.replaceChildren(...OVERRIDES.filter(([k]) => !(k === "bitrate" && s.rate_mode === "crf") && !(k === "crf" && s.rate_mode !== "crf") && !(k === "two_pass" && s.rate_mode === "crf"))
-      .map(([k, label]) => h("label", { class: "field" }, h("span", {}, label), control(k))));
+    adv.replaceChildren(...OVERRIDES.filter((k) => !inactive(k, s))
+      .map((k) => h("label", { class: "field" }, h("span", {}, SET[k].label + (SET[k].unit ? ` (${SET[k].unit})` : "")), control(k))));
   }
   let seq = 0;
   const estimate = debounce(async () => {
@@ -1374,100 +1376,290 @@ PAGES.automation = async (pg) => {
 };
 
 // ───────────────────────────── presets ─────────────────────────────
-const GROUPS = [
-  ["Video", ["codec", "encoder", "resolution", "rate_mode", "bitrate", "crf", "speed", "tune", "bit_depth", "two_pass", "maxrate", "bufsize", "hdr", "deinterlace"]],
-  ["Audio & subtitles", ["audio", "langs", "subs"]],
-  ["Output", ["container", "after", "skip_same", "extra"]],
-];
-const FIXED = new Set(["codec", "encoder", "resolution", "rate_mode", "audio", "subs", "container", "after", "speed", "tune", "bit_depth"]);
+// Every preset setting in plain words. opts: value → [label, what that choice means]; check: an on/off setting;
+// adv: lives under Advanced. Shared by the Presets page and the encode dialog.
+const SET = {
+  codec: { label: "Video codec", opts: {
+    hevc: ["HEVC (H.265)", "best balance of size and compatibility"], h264: ["H.264", "plays on anything; bigger files"],
+    av1: ["AV1", "smallest files; needs a newer TV or player"], copy: ["Keep the video as it is", "only audio, subtitles or the file type change"] } },
+  resolution: { label: "Max resolution", order: ["source", "2160", "1080", "720", "480"], opts: {
+    source: ["Same as the source", "never scaled"], 2160: ["4K · 2160p", "bigger sources are scaled down; smaller ones left alone"],
+    1080: ["1080p", "4K sources are scaled down; smaller ones left alone"], 720: ["720p", "bigger sources are scaled down; smaller ones left alone"],
+    480: ["SD · 480p", "bigger sources are scaled down"] } },
+  rate_mode: { label: "Size control", opts: {
+    bitrate: ["Target bitrate", "you pick the size; quality follows the scene"], crf: ["Constant quality", "you pick the look; size follows the scene"] } },
+  bitrate: { label: "Bitrate", unit: "kb/s" },
+  crf: { label: "Quality (CRF)" },
+  hdr: { label: "Keep HDR", check: true, hint: "HDR10 and HLG colour info; without it, HDR looks washed out" },
+  audio: { label: "Audio", opts: {
+    copy: ["Keep every track as it is", ""], eac3_51: ["Shrink big tracks to EAC3 5.1", "AC3, EAC3 and AAC are kept; TrueHD, DTS-HD and 7.1 become EAC3 5.1"],
+    aac_stereo: ["Convert to AAC stereo", "smallest and plays anywhere; surround is lost"], opus: ["Convert to Opus", "efficient; keeps the channel count"] } },
+  langs: { label: "Audio languages", hint: "comma separated, e.g. jpn,eng", placeholder: "all" },
+  subs: { label: "Subtitles", opts: { copy: ["Keep all", ""], forced: ["Forced only", "just the signs and foreign-dialogue tracks"], none: ["Drop all", ""] } },
+  after: { label: "After a good encode", opts: {
+    ask: ["Ask me in Review", "nothing is replaced until you OK it"], auto: ["Replace the original", "only when every check passes; the original goes to recast's trash"],
+    keep: ["Keep both files", "the new file is saved next to the original"] } },
+  skip_same: { label: "Skip files that are already fine", check: true, hint: "already this codec at this size or smaller, or wouldn't shrink by 5%" },
+  container: { label: "File type", opts: { mkv: ["MKV", "fits every kind of track"], mp4: ["MP4", "picture-based subtitles are dropped"] } },
+  encoder: { label: "Encoder", adv: true },
+  speed: { label: "Speed", adv: true, hint: "slower = smaller at the same quality" },
+  bit_depth: { label: "Colour depth", adv: true, order: ["10", "8", "source"], opts: {
+    10: ["10-bit", "no banding; plays on anything from the last several years"], 8: ["8-bit", "for very old players"], source: ["Same as the source", ""] } },
+  tune: { label: "Tune", adv: true, opts: {
+    none: ["None", ""], animation: ["Animation", "anime and cartoons"], grain: ["Film grain", "keeps the grain instead of smoothing it"],
+    film: ["Live action", ""], fastdecode: ["Fast decoding", "for weak playback devices"] } },
+  two_pass: { label: "Two-pass", adv: true, check: true, hint: "hits the bitrate more exactly; takes about twice as long (CPU encoders)" },
+  maxrate: { label: "Peak bitrate", adv: true, hint: "caps spikes for weak players; blank = no cap", placeholder: "e.g. 8M" },
+  bufsize: { label: "Buffer size", adv: true, hint: "usually twice the peak", placeholder: "e.g. 16M" },
+  deinterlace: { label: "Deinterlace", adv: true, check: true, hint: "for DVD and TV recordings" },
+  extra: { label: "Extra ffmpeg arguments", adv: true, hint: "added to the end of the command", placeholder: "e.g. -x265-params aq-mode=3" },
+};
+// a setting's choices in display order (`order` where the values look like numbers: object keys would sort them)
+const optKeys = (k) => (SET[k].order || Object.keys(SET[k].opts));
+const optLabel = (k, v) => ((SET[k] || {}).opts || {})[v] ? SET[k].opts[v][0] : String(v);
+const optHint = (k, v) => ((SET[k] || {}).opts || {})[v] ? SET[k].opts[v][1] : "";
+// settings that don't apply right now (hidden instead of greyed out)
+const inactive = (k, s) => (s.codec === "copy" && !["codec", "audio", "langs", "subs", "after", "skip_same", "container", "extra"].includes(k))
+  || (k === "bitrate" && s.rate_mode === "crf") || (k === "crf" && s.rate_mode !== "crf") || (k === "two_pass" && s.rate_mode === "crf");
+
+/** What a preset does, in one line. */
+function presetSummary(s) {
+  const parts = [];
+  if (s.codec === "copy") parts.push("Video kept as it is");
+  else {
+    const res = s.resolution === "source" ? "at the source resolution" : `up to ${optLabel("resolution", s.resolution)}`;
+    parts.push(`${optLabel("codec", s.codec)} ${res}, ${s.rate_mode === "crf" ? `quality ${s.crf}` : `${num(s.bitrate)} kb/s`}`);
+  }
+  const langs = s.langs ? ` (${s.langs.split(",").map((x) => x.trim()).filter(Boolean).join(", ")} only)` : "";
+  parts.push({ copy: "audio kept", eac3_51: "big audio shrunk to EAC3 5.1", aac_stereo: "audio to AAC stereo", opus: "audio to Opus" }[s.audio] + langs);
+  parts.push({ copy: "subtitles kept", forced: "forced subtitles only", none: "no subtitles" }[s.subs]);
+  parts.push(s.container.toUpperCase());
+  parts.push({ ask: "asks before replacing", auto: "replaces automatically", keep: "keeps both files" }[s.after]);
+  return parts.filter(Boolean).join(" · ");
+}
+
+/** One setting as a field row: plain label + what the current choice means, and its control. */
+function settingRow(k, s, P, set) {
+  const d = SET[k] || { label: k };
+  const sch = P.schema[k] || { options: [], bad: [] };
+  const v = s[k];
+  const hint = h("small", {});
+  let ctl;
+  if (d.check) {
+    ctl = h("label", { class: "check" }, h("input", { type: "checkbox", "data-k": k, checked: v, onchange: (e) => set(k, e.target.checked, true) }), "on");
+  } else if (k === "rate_mode") {
+    ctl = h("div", { class: "seg", role: "group", "data-k": k }, optKeys(k).map((o) => h("button", { class: v === o ? "on" : "", onclick: () => set(k, o, true) }, optLabel(k, o))));
+  } else if (k === "encoder") {
+    const list = ["auto", ...((P.encoders || {})[s.codec] || [])];
+    if (!list.includes(v)) list.push(v);
+    ctl = h("select", { "data-k": k, onchange: (e) => set(k, e.target.value, true) }, list.map((o) => {
+      const bad = (sch.bad || []).includes(o);
+      return h("option", { value: o, selected: o === v, disabled: bad && o !== v }, o === "auto" ? "Automatic" : (bad ? "✗ " : "") + o);
+    }));
+  } else if (d.opts || (sch.options.length && typeof v === "string" && !d.placeholder)) {
+    const opts = d.opts ? optKeys(k) : sch.options.map(String);
+    if (!opts.includes(String(v))) opts.push(String(v));
+    ctl = h("select", { "data-k": k, onchange: (e) => set(k, e.target.value, true) }, opts.map((o) => h("option", { value: o, selected: o === String(v) }, optLabel(k, o))));
+  } else if (typeof v === "number") {
+    ctl = h("input", { type: "number", "data-k": k, value: v, step: k === "bitrate" ? 100 : 1, min: 0, oninput: (e) => { if (e.target.value !== "") set(k, Number(e.target.value)); } });
+  } else {
+    ctl = h("input", { type: "text", "data-k": k, value: v, placeholder: d.placeholder || "", spellcheck: "false", style: k === "extra" ? "width:100%;font-family:var(--mono)" : "",
+      oninput: (e) => set(k, e.target.value) });
+  }
+  hint.textContent = d.opts ? optHint(k, String(v)) : d.hint || "";
+  (ctl.querySelector("input") || ctl).setAttribute("aria-label", d.label);
+  return { row: h("div", { class: "field-row" }, h("div", { class: "k" }, d.label, hint), h("div", { class: "row wrap" }, ctl, d.unit ? h("span", { class: "dim small" }, d.unit) : null)), ctl };
+}
 
 PAGES.presets = async (pg) => {
-  const P = await getPresets(true);
+  let P = await getPresets(true);
   if (!pg.alive) return;
-  const listBox = h("div", { class: "chips", style: "padding-bottom:16px" });
-  const editor = h("section", { class: "sec" });
-  pg.el.append(pageHead("Presets", "How files get encoded. Encoders this machine can't run are marked ✗.",
-    h("button", { class: "btn", onclick: () => edit({ name: "New preset", description: "", settings: { ...(cur ? cur.settings : P.presets[0].settings) } }, true) }, "New preset")),
-  listBox, editor);
-  let cur = null;
-  const drawList = () => listBox.replaceChildren(...P.presets.map((p) => h("button", { class: "chip" + (cur && cur.name === p.name ? " on" : ""), title: p.description || p.encoder, onclick: () => edit(p) },
-    p.name, p.default ? h("span", { class: "badge" }, "default") : "")));
+  // the preset being edited: `base` as saved (null = new, unsaved), `s`/`name`/`desc` as edited
+  let base = null, s = {}, name = "", desc = "", advOpen = null, look = null;
+  const picker = h("select", { class: "preset-pick", "aria-label": "Preset", onchange: async () => {
+    const want = picker.value;
+    if (!(await okToLeave())) { picker.value = base ? base.name : "__new__"; return; }
+    open(P.presets.find((p) => p.name === want));
+  } });
+  const actions = h("div", { class: "row wrap" });
+  const about = h("div", { class: "preset-about" });
+  const body = h("div");
+  const savebar = h("div", { class: "savebar hidden" });
+  pg.el.append(pageHead("Presets", "How files get encoded. Pick one to see or change it — it's saved only when you press Save.",
+    h("button", { class: "btn", onclick: () => newPreset(base) }, "New preset")),
+  h("div", { class: "preset-bar" }, picker, actions), about, body, savebar);
 
-  function edit(p, isNew) {
-    cur = isNew ? null : p;
-    drawList();
-    const s = { ...p.settings };
-    const name = h("input", { type: "text", value: p.name });
-    const desc = h("input", { type: "text", value: p.description || "", placeholder: "what it's for" });
-    const form = h("div");
-    const json = h("textarea", { rows: 22, class: "hidden", spellcheck: "false" });
-    let asJson = false;
-    const warn = h("div", { class: "red", style: "font-size:13px" });
-    const control = (k) => {
-      const sch = P.schema[k] || { options: [], bad: [], doc: "" };
-      const v = s[k];
-      let el;
-      if (typeof v === "boolean") el = h("label", { class: "check", style: "height:32px" }, h("input", { type: "checkbox", checked: v, onchange: (e) => { s[k] = e.target.checked; } }), "on");
-      else if (FIXED.has(k)) {
-        el = h("select", { onchange: (e) => { s[k] = e.target.value; drawWarn(); } }, sch.options.map((o) => {
-          const bad = (sch.bad || []).includes(o);
-          return h("option", { value: o, selected: String(o) === String(v), class: bad ? "bad" : "" }, (bad ? "✗ " : "") + o);
-        }));
-      } else {
-        const id = "dl-" + k;
-        el = h("span", { style: "display:contents" }, h("input", { type: typeof v === "number" ? "number" : "text", value: v, list: id, style: typeof v === "number" ? "" : "width:100%",
-          onchange: (e) => { s[k] = typeof v === "number" ? Number(e.target.value) : e.target.value; } }),
-        h("datalist", { id }, sch.options.map((o) => h("option", { value: o }))));
-      }
-      return h("label", { class: "field" + (k === "extra" ? " full" : "") }, h("span", {}, k.replace(/_/g, " ")), el, h("span", { class: "dim", style: "font-size:11.5px" }, sch.doc));
-    };
-    const drawWarn = () => {
-      const bad = (P.schema.encoder.bad || []).includes(s.encoder);
-      warn.textContent = bad ? `✗ ${s.encoder} doesn't work on this machine — pick "auto" or one without ✗.` : "";
-    };
-    const drawForm = () => {
-      const seen = new Set(GROUPS.flatMap((g) => g[1]));
-      const extra = Object.keys(s).filter((k) => !seen.has(k));
-      form.replaceChildren(...[...GROUPS, ...(extra.length ? [["Other", extra]] : [])].map(([g, keys]) => h("div", { class: "form-group" },
-        h("h3", {}, g), h("div", { class: "form-grid" }, keys.filter((k) => k in s).map(control)))));
-      drawWarn();
-    };
-    drawForm();
-    const toggle = h("button", { class: "btn sm ghost", onclick: () => {
-      if (!asJson) { json.value = JSON.stringify(s, null, 2); }
-      else {
-        try { Object.assign(s, JSON.parse(json.value)); } catch (e) { toast("JSON: " + e.message, "red"); return; }
-        drawForm();
-      }
-      asJson = !asJson;
-      json.classList.toggle("hidden", !asJson); form.classList.toggle("hidden", asJson);
-      toggle.textContent = asJson ? "Edit as form" : "Edit as JSON";
-    } }, "Edit as JSON");
-    const doSave = async () => {
-      if (asJson) { try { Object.assign(s, JSON.parse(json.value)); } catch (e) { toast("JSON: " + e.message, "red"); return; } }
-      const r = await act(() => put("/api/presets", { name: name.value.trim(), description: desc.value, settings: s, old_name: isNew ? null : p.name }));
-      if (!r) return;
-      toast(r.warning ? `Saved — ${r.warning}` : "Saved", r.warning ? "amber" : "green");
-      const fresh = await getPresets(true);
-      Object.assign(P, fresh);
-      const np = P.presets.find((x) => x.name === name.value.trim());
-      if (np) edit(np);
-    };
-    editor.replaceChildren(
-      secHead(isNew ? "New preset" : p.name, toggle),
-      h("div", { class: "form-grid", style: "margin-bottom:18px" }, h("label", { class: "field" }, h("span", {}, "Name"), name), h("label", { class: "field", style: "grid-column:span 2" }, h("span", {}, "Description"), desc)),
-      warn, form, json,
-      h("div", { class: "row wrap", style: "margin-top:18px" },
-        h("button", { class: "btn primary", onclick: doSave }, "Save"),
-        !isNew && !p.default ? h("button", { class: "btn", onclick: async () => { if (await act(() => post("/api/presets/default", { name: p.name }), `${p.name} is now the default`)) { Object.assign(P, await getPresets(true)); S.info.default_preset = p.name; edit(P.presets.find((x) => x.name === p.name)); } } }, "Make default") : "",
-        !isNew ? h("button", { class: "btn", onclick: () => edit({ name: p.name + " copy", description: p.description, settings: { ...s } }, true) }, "Duplicate") : "",
-        h("span", { class: "spacer" }),
-        !isNew && !p.default ? h("button", { class: "btn danger", onclick: async () => {
-          if (!(await confirmBox(`Delete ${p.name}?`, "Files already encoded with it are not affected.", "Delete", "danger"))) return;
-          if (await act(() => api("/api/presets?name=" + enc(p.name), { method: "DELETE" }))) { Object.assign(P, await getPresets(true)); edit(P.presets[0]); }
-        } }, "Delete") : ""));
+  const snapshot = () => JSON.stringify([name, desc, s]);
+  let saved = "";
+  const dirty = () => !base || snapshot() !== saved;
+  async function okToLeave() {
+    if (!dirty()) return true;
+    return confirmBox(base ? `Discard your changes to ${base.name}?` : "Discard the new preset?", "", "Discard", "danger");
   }
-  edit(P.presets.find((p) => p.name === pg.params.get("name")) || P.presets.find((p) => p.default) || P.presets[0]);
+  pg.leave = okToLeave;
+  window.onbeforeunload = () => (pg.alive && dirty() ? true : undefined);
+
+  function open(p, draft) {
+    base = draft ? null : p;
+    s = { ...p.settings }; name = p.name; desc = p.description || "";
+    saved = snapshot();
+    advOpen = null;
+    draw();
+  }
+
+  function drawTop() {
+    picker.replaceChildren(...P.presets.map((p) => h("option", { value: p.name, selected: base && p.name === base.name }, p.name + (p.default ? "  — default" : ""))),
+      base ? "" : h("option", { value: "__new__", selected: true }, `${name || "New preset"}  — not saved yet`));
+    actions.replaceChildren(...(base ? [
+      !base.default ? h("button", { class: "btn", onclick: makeDefault }, "Make default") : "",
+      h("button", { class: "btn", onclick: () => newPreset(base, true) }, "Duplicate"),
+      !base.default ? h("button", { class: "btn danger", onclick: remove }, "Delete") : "",
+    ] : []));
+    const uses = base ? base.uses || [] : [];
+    const done = base && base.done && base.done.files ? base.done : null;
+    about.replaceChildren(
+      h("div", { class: "preset-summary" }, presetSummary(s)),
+      h("div", { class: "row wrap dim small", style: "gap:6px" },
+        base ? (uses.length ? uses.map((u) => h("span", { class: "badge outline" }, u)) : "Only used when you pick it") : "New — press Create preset to save it",
+        done ? h("span", { style: "margin-left:4px" }, `Replaced ${num(done.files)} file${done.files === 1 ? "" : "s"} so far · ${fsize(done.src - done.out)} saved (−${pct(1 - done.out / done.src)})`) : ""));
+  }
+
+  const qualityHint = { bitrate: null, crf: null };
+  let encHint = null;
+  const cmd = h("pre", { class: "lines", style: "max-height:none" });
+  const preview = debounce(async () => {
+    const r = await post("/api/presets/preview", { settings: s }).catch(() => null);
+    if (!r || !pg.alive) return;
+    look = r;
+    for (const k of ["bitrate", "crf"]) {
+      const el = qualityHint[k];
+      if (!el) continue;
+      el.textContent = r.problem || (k === "crf" ? `${r.quality || ""} · lower = better and bigger (0–${r.crf_top})` : r.quality);
+      el.style.color = r.problem ? "var(--red)" : /low/.test(r.quality) ? "var(--amber)" : "";  // "low"/"very low" = worth a look
+    }
+    if (encHint) {
+      const bad = (P.schema.encoder.bad || []).includes(s.encoder);
+      encHint.textContent = bad ? `${s.encoder} doesn't work on this machine — pick Automatic` : s.encoder === "auto" ? `uses ${r.encoder} on this machine` : (P.schema.encoder.labels || {})[s.encoder] || "";
+      encHint.style.color = bad ? "var(--red)" : "";
+    }
+    cmd.textContent = r.lines.map((l, i) => (i ? "  " : "") + l).join(" \\\n");
+  }, 150);
+
+  // one change: text and numbers update in place; choices redraw (other settings may appear or go)
+  const set = (k, v, redraw) => {
+    s[k] = v;
+    if (redraw) { draw(k); return; }
+    drawTop(); drawSave(); preview();
+  };
+
+  function draw(focusKey) {
+    drawTop();
+    const row = (k) => (!(k in s) || inactive(k, s) ? null : settingRow(k, s, P, set).row);
+    const rows = (keys) => keys.map(row).filter(Boolean);
+    const advKeys = Object.keys(SET).filter((k) => SET[k].adv);
+    const changed = advKeys.filter((k) => k in s && JSON.stringify(s[k]) !== JSON.stringify((P.defaults || {})[k]));
+    if (advOpen == null) advOpen = changed.length > 0;
+    const adv = h("details", { open: advOpen, ontoggle: (e) => { advOpen = e.target.open; } },
+      h("summary", {}, "Advanced", h("span", { class: "dim small", style: "font-weight:400;margin-left:8px" }, "encoder, speed, colour depth, tune, two-pass, caps, extra arguments"),
+        changed.length ? h("span", { class: "badge", style: "margin-left:8px" }, `${changed.length} changed`) : ""),
+      h("div", { style: "margin-top:10px" }, fields(...rows(advKeys),
+        h("div", { class: "field-row" }, h("div", { class: "k" }, "As JSON", h("small", {}, "for copying a preset or editing many settings at once")),
+          h("div", { class: "row wrap" }, h("button", { class: "btn sm", onclick: editJson }, "Edit as JSON"))))));
+    body.replaceChildren(
+      sec("Video", fields(...rows(["codec", "resolution", "rate_mode", "bitrate", "crf", "hdr"]))),
+      sec("Audio & subtitles", fields(...rows(["audio", "langs", "subs"]))),
+      sec("When it's done", fields(...rows(["after", "skip_same", "container"]))),
+      sec(null, adv),
+      sec("Name & description", fields(
+        fieldRow("Name", "shown in lists and on the Automation page", h("input", { type: "text", value: name, style: "width:100%", oninput: (e) => { name = e.target.value; drawSave(); } })),
+        fieldRow("Description", "what it's for — e.g. \"anime\" or \"4K films\"", h("input", { type: "text", value: desc, placeholder: "optional", style: "width:100%", oninput: (e) => { desc = e.target.value; drawSave(); } })))),
+      sec(null, h("details", {}, h("summary", {}, "The ffmpeg command", h("span", { class: "dim small", style: "font-weight:400;margin-left:8px" }, "for a typical 1080p episode")),
+        h("div", { style: "margin-top:10px" }, cmd))));
+    // hints the preview fills in (quality words, which encoder "Automatic" picks)
+    for (const k of ["bitrate", "crf"]) { const el = body.querySelector(`[data-k="${k}"]`); qualityHint[k] = el ? el.closest(".field-row").querySelector(".k small") : null; }
+    const enc = body.querySelector('[data-k="encoder"]');
+    encHint = enc ? enc.closest(".field-row").querySelector(".k small") : null;
+    if (focusKey) { const el = body.querySelector(`[data-k="${focusKey}"]`); if (el) el.focus(); }
+    drawSave();
+    preview();
+  }
+
+  function drawSave() {
+    const show = dirty();
+    savebar.classList.toggle("hidden", !show);
+    if (!show) return;
+    savebar.replaceChildren(
+      h("span", { class: "grow" }, base ? h("span", {}, h("span", { class: "amber" }, "● "), `Unsaved changes to ${base.name}`) : h("span", {}, h("span", { class: "amber" }, "● "), `${name || "New preset"} isn't saved yet`)),
+      h("button", { class: "btn", onclick: async () => { if (base) open(base); else if (await okToLeave()) open(P.presets.find((p) => p.default) || P.presets[0]); } }, base ? "Undo changes" : "Discard"),
+      h("button", { class: "btn primary", onclick: save }, base ? "Save" : "Create preset"));
+  }
+
+  async function reload(select) {
+    P = await getPresets(true);
+    if (!pg.alive) return;
+    open(P.presets.find((p) => p.name === select) || P.presets.find((p) => p.default) || P.presets[0]);
+  }
+
+  async function save() {
+    const n = name.trim();
+    const r = await act(() => put("/api/presets", { name: n, description: desc, settings: s, old_name: base ? base.name : null }));
+    if (!r) return;
+    toast(r.warning ? `Saved — ${r.warning}` : `Saved ${n}`, r.warning ? "amber" : "green");
+    S.info.default_preset = base && base.default ? n : S.info.default_preset;
+    await reload(n);
+  }
+
+  async function makeDefault() {
+    if (await act(() => post("/api/presets/default", { name: base.name }), `${base.name} is now the default`)) {
+      S.info.default_preset = base.name;
+      await reload(base.name);
+    }
+  }
+
+  async function remove() {
+    if (!(await confirmBox(`Delete ${base.name}?`, "Files already encoded with it are not affected.", "Delete", "danger"))) return;
+    if (await act(() => api("/api/presets?name=" + enc(base.name), { method: "DELETE" }), `Deleted ${base.name}`)) { saved = snapshot(); await reload(); }
+  }
+
+  async function newPreset(from, dup) {
+    if (!(await okToLeave())) return;
+    const start = h("select", {}, P.presets.map((p) => h("option", { value: p.name, selected: from && p.name === from.name }, p.name)));
+    const nm = h("input", { type: "text", value: dup && from ? `${from.name} copy` : "", placeholder: "e.g. Anime HEVC · 1800k", style: "width:100%" });
+    const go = () => {
+      const n = nm.value.trim();
+      if (!n) { nm.focus(); return; }
+      if (P.presets.some((p) => p.name === n)) { toast(`There's already a preset called ${n}`, "red"); return; }
+      const src = P.presets.find((p) => p.name === start.value);
+      m.close();
+      open({ name: n, description: dup ? src.description : "", settings: src.settings }, true);
+    };
+    nm.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+    const m = modal({
+      title: dup ? `Duplicate ${from.name}` : "New preset",
+      body: [h("label", { class: "field" }, h("span", {}, "Name"), nm),
+        h("label", { class: "field" }, h("span", {}, "Start from"), start),
+        h("p", { class: "dim small", style: "margin:0" }, "You can change every setting next; nothing is saved until you press Create.")],
+      foot: (close) => [h("button", { class: "btn", onclick: close }, "Cancel"), h("button", { class: "btn primary", onclick: go }, "Continue")],
+    });
+    setTimeout(() => nm.focus(), 30);
+  }
+
+  function editJson() {
+    const ta = h("textarea", { rows: 22, spellcheck: "false", style: "width:100%;font:12.5px/1.5 var(--mono)" }, JSON.stringify(s, null, 2));
+    const m = modal({
+      title: `${name} as JSON`, wide: true,
+      body: [ta, h("p", { class: "dim small", style: "margin:6px 0 0" }, "Apply puts it into the form; it's saved when you press Save.")],
+      foot: (close) => [h("button", { class: "btn", onclick: close }, "Cancel"), h("button", { class: "btn primary", onclick: () => {
+        let v;
+        try { v = JSON.parse(ta.value); } catch (e) { toast("JSON: " + e.message, "red"); return; }
+        const unknown = Object.keys(v).filter((k) => !(k in (P.defaults || s)));
+        if (unknown.length) { toast("Unknown settings: " + unknown.join(", "), "red"); return; }
+        s = { ...s, ...v }; m.close(); advOpen = null; draw();
+      } }, "Apply")],
+    });
+  }
+
+  open(P.presets.find((p) => p.name === pg.params.get("name")) || P.presets.find((p) => p.default) || P.presets[0]);
 };
 
 // ───────────────────────────── history ─────────────────────────────

@@ -21,7 +21,7 @@ re-encodes are tagged, so the other never re-encodes them.
 On the server (any Linux with Docker, e.g. Debian 13):
 
 ```bash
-mkdir -p ~/recast && cd ~/recast
+sudo mkdir -p /opt/recast && sudo chown "$USER" /opt/recast && cd /opt/recast
 curl -fsSLO https://raw.githubusercontent.com/awpsec/recast/main/compose.yaml
 curl -fsSL https://raw.githubusercontent.com/awpsec/recast/main/.env.example -o .env
 nano .env
@@ -129,7 +129,7 @@ The **Automation** page has four modes:
 |---|---|
 | **Off** | nothing happens unless you start it. You encode from the Library. |
 | **Dry run** | recast makes every decision and shows them, but encodes nothing. Use it to check your thresholds. |
-| **Ask first** | clear wins are encoded one at a time, then wait in the Inbox for your OK before anything is replaced (at most 10 waiting by default). |
+| **Ask first** | clear wins are encoded one at a time, then wait in Review for your OK before anything is replaced (at most 10 waiting by default). |
 | **Automatic** | clear wins are encoded and replaced on their own. Borderline files wait in Review. |
 
 Every file gets a score: how much space your preferred preset would save, estimated at first and
@@ -147,14 +147,19 @@ free.
 Automation won't replace a file just because it was encoded:
 
 - An automatic encode only replaces the original if the *real* saving also clears your threshold
-  and every check passes (duration, track counts, size, decode test). Otherwise it waits in Review
-  with a note saying why.
+  and every check passes (duration, track counts, size, resolution, HDR, decode test). Otherwise it
+  waits in Review with a note saying why.
 - If the preset would cost a file anything besides bitrate (4K down to 1080p, HDR, Dolby Vision,
   surround sound), that file always waits in Review, however big the saving.
 - Shows or folders you exclude (a checkbox in the Library details) are never touched by
   automation. You can still encode them by hand.
-- Files recast already re-encoded (the `RECAST` tag, from any install) and originals you restored
-  are never redone.
+- Files recast already re-encoded (the `RECAST` tag, from any install), originals you restored and
+  encodes you discarded are never redone. A file whose encode failed isn't retried on its own
+  either (Retry is in the Queue). Any of these come back if the file itself changes.
+- If Sonarr/Radarr upgrade or delete a file while automation is working on it, that work is dropped
+  and the new file is looked at on its own. Your own jobs are never touched by automation.
+- A file a sweep finds that changed in the last 10 minutes (maybe still being copied in) is looked
+  at again once it settles.
 
 ### Pacing
 
@@ -191,12 +196,14 @@ Library says which preset automation will use there, and which rule picked it.
 
 ### Sonarr / Radarr
 
-1. **Settings → Sonarr & Radarr**: enter the URL and API key, then click *Save & test*. recast maps
-   their folder paths to its own automatically. It needs this for webhooks, preset rules,
-   episode names and the rescan after each replace.
-2. On the **Automation** page, copy the webhook URL for each.
-3. In Sonarr/Radarr: **Settings → Connect → + → Webhook**. Paste the URL, set the method to POST,
-   tick *On Import* and *On Upgrade*, and press *Test* (it shows up in recast's activity log).
+1. **Settings → Sonarr & Radarr**: enter the URL and API key, then click *Save & test* (or put them
+   in `.env` before the first start). recast maps their folder paths to its own automatically. It
+   needs this for webhooks, preset rules, episode names and the rescan after each replace.
+2. Click **Add recast's webhook** (there, or on the Automation page). recast adds a webhook for
+   *On Import* and *On Upgrade* to Sonarr/Radarr's **Settings → Connect**, and they send a test
+   while saving it, so a green check means the connection works both ways. It uses the address
+   you opened recast with; if Sonarr/Radarr can't reach that one, open recast by the server's IP
+   and click again. (You can still add it by hand: the URLs are on the Automation page.)
 
 New imports are looked at about 90 seconds later, scored, and encoded next if they clear your bar.
 If Sonarr upgrades an episode recast already re-encoded, the upgrade counts as a new file.
@@ -217,8 +224,11 @@ recast never writes over a file while it's working on it:
    get a rescan.
 
 If anything is off (the original changed since it was encoded, a file with the new name already
-exists, or there isn't enough space), recast stops and leaves everything as it was. If step 4 fails,
-the original is put back.
+exists, or there isn't enough space), recast stops and leaves everything as it was. The original is
+checked once more right before step 3, because writing back can take minutes. The new file gets the
+original's permissions. If step 4 fails, the original is put back, and if recast is cut off between
+steps 3 and 4 (power, crash, the share dropping), it finishes the job when it comes back instead of
+leaving the episode missing.
 
 **Restore** (History, the file's details, or `u` in the terminal app) is two renames in the other
 direction. The original returns under its old name, byte for byte, and the re-encode goes to the

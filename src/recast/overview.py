@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 
-from .config import config_dir
+from .config import config_dir, write_atomic
 from .encode import already_target, est_bytes, quality_loss
 from .probe import VIDEO_EXT, MediaInfo
 
@@ -46,17 +47,18 @@ def load_snapshot(root: str) -> dict | None:
         return None
 
 
+_snapshot_lock = threading.Lock()  # one file for every root: read-change-write it one at a time
+
+
 def save_snapshot(root: str, entries: list[tuple[str, int, float]], when: float | None = None) -> None:
     p = snapshot_file()
-    try:
-        data = json.loads(p.read_text())
-    except (OSError, ValueError):
-        data = {}
-    data[root] = {"when": when or time.time(), "files": entries}
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data))
-    os.replace(tmp, p)
+    with _snapshot_lock:
+        try:
+            data = json.loads(p.read_text())
+        except (OSError, ValueError):
+            data = {}
+        data[root] = {"when": when or time.time(), "files": entries}
+        write_atomic(p, json.dumps(data))
 
 
 def list_files(root: str, progress=None, cancelled=lambda: False) -> list[tuple[str, int, float]]:

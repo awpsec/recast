@@ -10,7 +10,11 @@ from recast.encode import save_preset
 from recast.service import Service
 from recast.server.app import create_app
 
+from recast.config import Arr
+from recast.server.app import SESSION_COOKIE
+
 from test_automation import CAPS, FAST, clip
+from test_safety import FakeArr, fake_arr  # noqa: F401 — fake_arr is a fixture
 
 
 @pytest.fixture
@@ -200,3 +204,59 @@ async def test_health_is_public_and_exclusions(client, svc):
     await ok(await client.post("/api/automation/exclude", json={"path": show, "on": False}))
     assert not svc.cfg.auto_exclude
     assert (await client.post("/api/automation/exclude", json={"path": "/etc", "on": True})).status == 400
+
+
+async def test_renaming_a_preset_takes_automation_with_it(client, svc):
+    await ok(await client.put("/api/presets", json={"name": "Mine", "settings": {"codec": "hevc"}}))
+    svc.cfg.auto_preset = "Mine"
+    svc.cfg.auto_rules = [{"by": "type", "value": "anime", "preset": "Mine"}]
+    await ok(await client.put("/api/presets", json={"name": "Ours", "old_name": "Mine", "settings": {"codec": "hevc"}}))
+    assert svc.cfg.auto_preset == "Ours" and svc.cfg.auto_rules[0]["preset"] == "Ours"
+    assert "Ours" in svc.presets and "Mine" not in svc.presets
+    r = await client.put("/api/presets", json={"name": "Ours", "old_name": "Test fast", "settings": {}})
+    assert r.status == 400 and "already" in (await r.json())["error"]  # renaming onto another preset
+    r = await client.delete("/api/presets", params={"name": "Ours"})
+    assert r.status == 400 and "automation" in (await r.json())["error"]  # automation still uses it
+    assert "Ours" in svc.presets
+
+
+async def test_settings_are_checked_before_saving(client, svc, tmp_path):
+    (tmp_path / "a-file").write_text("x")
+    for bad in ({"originals": "bin"}, {"trash_days": -1}, {"max_scratch_gb": 0}, {"min_free_gb": "lots"},
+                {"default_preset": "Nope"}, {"scratch": str(tmp_path / "a-file")}):
+        r = await client.put("/api/settings", json=bad)
+        assert r.status == 400, bad
+    assert svc.cfg.originals == "trash" and svc.cfg.trash_days != -1
+    await ok(await client.put("/api/settings", json={"scratch": str(tmp_path / "new" / "scratch")}))
+    assert svc.cfg.scratch == str(tmp_path / "new" / "scratch") and (tmp_path / "new" / "scratch").is_dir()
+
+
+async def test_logins_survive_a_restart_until_the_password_changes(client, svc, aiohttp_client):
+    await ok(await client.post("/api/password", json={"password": "pw"}))
+    old = client.session.cookie_jar.filter_cookies(client.make_url("/"))[SESSION_COOKIE].value
+    restarted = await aiohttp_client(create_app(svc))  # an update or reboot: same config, new process
+    restarted.session.cookie_jar.clear()
+    cookie = {"Cookie": f"{SESSION_COOKIE}={old}"}
+    await ok(await restarted.get("/api/state", headers=cookie))
+    assert (await restarted.get("/api/state", headers={"Cookie": f"{SESSION_COOKIE}={old[:-2]}xx"})).status == 401
+    await ok(await client.post("/api/password", json={"password": "new"}))  # signs the changer back in
+    await ok(await client.get("/api/state"))
+    assert (await restarted.get("/api/state", headers=cookie)).status == 401  # everyone else is signed out
+    await ok(await client.post("/api/logout"))
+    assert (await client.get("/api/state")).status == 401
+
+
+async def test_webhook_button(client, svc, fake_arr):  # noqa: F811
+    d = await ok(await client.get("/api/arr/webhooks"))
+    assert d["sonarr"] == {"connected": False} and d["urls"]["sonarr"].endswith(f"token={svc.cfg.webhook_token}")
+    assert (await client.post("/api/arr/sonarr/webhook")).status == 400  # not connected yet
+    svc.cfg.sonarr = Arr(fake_arr, "k")
+    d = await ok(await client.get("/api/arr/webhooks"))
+    assert d["sonarr"] == {"connected": True, "installed": False, "current": False}
+    r = await ok(await client.post("/api/arr/sonarr/webhook"))
+    assert r["result"] == "added" and r["url"] == d["urls"]["sonarr"]
+    d = await ok(await client.get("/api/arr/webhooks"))
+    assert d["sonarr"] == {"connected": True, "installed": True, "current": True}
+    FakeArr.hooks, FakeArr.reject = [], True
+    r = await client.post("/api/arr/sonarr/webhook")
+    assert r.status == 400 and "couldn't reach recast" in (await r.json())["error"]

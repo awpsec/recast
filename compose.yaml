@@ -1,6 +1,6 @@
 # recast-server — the always-on half of recast, next to your Sonarr/Radarr.
 #
-#   mkdir -p ~/recast && cd ~/recast
+#   sudo mkdir -p /opt/recast && sudo chown "$USER" /opt/recast && cd /opt/recast
 #   curl -fsSLO https://raw.githubusercontent.com/awpsec/recast/main/compose.yaml
 #   curl -fsSL https://raw.githubusercontent.com/awpsec/recast/main/.env.example -o .env
 #   nano .env                      # library paths, PUID/PGID

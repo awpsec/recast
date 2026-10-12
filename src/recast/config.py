@@ -15,12 +15,35 @@ import os
 import platform
 import subprocess
 import sys
+import tempfile
+import threading
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 APP = "recast"
 SERVER = "recast-server"
 _profile = APP  # switched to SERVER by `recast-server` before anything is loaded
+
+
+_write_lock = threading.Lock()
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Replace `path` with `text` all at once: a crash mid-write leaves the old file, and threads saving at the
+    same time can't trip over one shared temp file (each writer gets its own, and writes go one at a time)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _write_lock:
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
 
 def use_server_profile() -> None:
@@ -208,6 +231,7 @@ class Config:
     webhook_token: str = ""         # for Sonarr/Radarr Connect → Webhook URLs
     # ── web app ──
     web_password_hash: str = ""     # pbkdf2 "salt$hash"; empty = no login (fine on localhost only)
+    session_secret: str = ""        # signs login cookies; replaced when the password changes
     theme: str = "recast"
 
     @property
@@ -219,11 +243,7 @@ class Config:
         return config_dir() / "config.json"
 
     def save(self) -> None:
-        d = asdict(self)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(d, indent=2, ensure_ascii=False))
-        os.replace(tmp, self.path)
+        write_atomic(self.path, json.dumps(asdict(self), indent=2, ensure_ascii=False))
 
     @classmethod
     def load(cls) -> "Config":

@@ -9,7 +9,7 @@ import threading
 import time
 from typing import Callable, Iterator
 
-from .arr import ArrIndex
+from .arr import ArrError, ArrIndex, auto_map
 from .config import Config, Root, config_dir
 from .encode import load_presets
 from .engine import Engine, norm, show_root
@@ -227,6 +227,24 @@ class Service:
             self.arr = None
         self.engine.arr = self.arr
         return self.arr
+
+    def refresh_arr(self) -> None:
+        """Blocking (thread): work out any missing path mapping (Sonarr's "/tv/…" is what folder here?), then
+        re-read everything Sonarr/Radarr know. Configured from the environment, this is what makes them just work."""
+        if not self.arr:
+            return
+        mapped = False
+        for c in self.arr.clients.values():
+            if not c.cfg.path_map and self.cfg.roots:
+                try:
+                    pairs = auto_map(c, [r.path for r in self.cfg.roots])
+                except ArrError:
+                    continue  # refresh() reports it
+                if pairs:
+                    c.cfg.path_map, mapped = pairs, True
+        if mapped:
+            self.cfg.save()
+        self.arr.refresh()
 
     def root_for(self, path: str) -> Root | None:
         best = None

@@ -10,6 +10,13 @@ HAVE_FFMPEG = shutil.which("ffmpeg") is not None
 os.environ["RECAST_NO_UPDATE_CHECK"] = "1"  # tests never ask GitHub for releases
 
 
+@pytest.fixture(autouse=True)
+def fresh_files_are_settled(monkeypatch):
+    """Test clips are seconds old; automation would otherwise wait for them to "settle" (see test_safety)."""
+    from recast import automation
+    monkeypatch.setattr(automation, "SETTLE", 0)
+
+
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("RECAST_HOME", str(tmp_path / "home"))

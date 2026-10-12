@@ -29,6 +29,24 @@ class ArrError(Exception):
     pass
 
 
+HOOK_EVENTS = ("onDownload", "onUpgrade")  # Sonarr/Radarr "On Import" and "On Upgrade"
+
+
+def _field(notification: dict, name: str):
+    return next((f.get("value") for f in notification.get("fields", []) if f.get("name") == name), None)
+
+
+def _why(e: "urllib.error.HTTPError") -> str:
+    """The reason Sonarr/Radarr gave for a 400 (validation errors come back as a JSON list)."""
+    try:
+        body = json.loads(e.read() or b"null")
+    except (ValueError, OSError):
+        return ""
+    items = body if isinstance(body, list) else [body] if isinstance(body, dict) else []
+    msgs = [str(i.get("errorMessage") or i.get("message") or "") for i in items if isinstance(i, dict)]
+    return (": " + "; ".join(m for m in msgs if m)[:300]) if any(msgs) else ""
+
+
 class ArrClient:
     def __init__(self, kind: str, cfg: Arr):
         self.kind, self.cfg = kind, cfg
@@ -42,7 +60,8 @@ class ArrClient:
             with urllib.request.urlopen(r, timeout=timeout) as resp:
                 return json.loads(resp.read() or b"null")
         except urllib.error.HTTPError as e:
-            raise ArrError(f"{self.kind} HTTP {e.code}" + (" (bad API key?)" if e.code == 401 else "")) from e
+            raise ArrError(f"{self.kind} HTTP {e.code}" + (" (bad API key?)" if e.code == 401 else "")
+                           + _why(e)) from e
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             raise ArrError(f"can't reach {self.kind} at {self.cfg.url}: {getattr(e, 'reason', e)}") from e
 
@@ -51,6 +70,43 @@ class ArrClient:
 
     def root_folders(self) -> list[str]:
         return [r["path"] for r in self.req("GET", "rootfolder")]
+
+    # ── recast's webhook (Settings → Connect in Sonarr/Radarr) ──
+    def find_webhook(self) -> dict | None:
+        """The webhook pointing at recast in this Sonarr/Radarr, if there is one."""
+        mark = f"/api/hook/{self.kind.lower()}"
+        for n in self.req("GET", "notification"):
+            if n.get("implementation") == "Webhook" and mark in str(_field(n, "url") or ""):
+                return n
+        return None
+
+    def install_webhook(self, url: str) -> str:
+        """Add recast's webhook here (or point the existing one at `url`): POST on import and on upgrade.
+        Sonarr/Radarr send a test while saving it, so success also means they can reach recast.
+        Returns "added", "updated" or "already set"."""
+        cur = self.find_webhook()
+        if cur and _field(cur, "url") == url and all(cur.get(f) for f in HOOK_EVENTS):
+            return "already set"
+        if cur:
+            body = cur
+        else:
+            body = next((dict(t) for t in self.req("GET", "notification/schema")
+                         if t.get("implementation") == "Webhook"), None)
+            if not body:
+                raise ArrError(f"{self.kind} doesn't offer webhooks (too old?)")
+            body.pop("id", None)
+            body["name"] = "recast"
+        for f in body.get("fields", []):
+            if f.get("name") == "url":
+                f["value"] = url
+            elif f.get("name") == "method":
+                f["value"] = 1  # POST
+        body.update({f: True for f in HOOK_EVENTS})
+        if cur:
+            self.req("PUT", f"notification/{cur['id']}", body, timeout=40)
+            return "updated"
+        self.req("POST", "notification", body, timeout=40)
+        return "added"
 
     def to_local(self, arr_path: str) -> str:
         n = _norm(arr_path)
@@ -163,8 +219,9 @@ class ArrIndex:
         if not rec:
             return "not managed by Sonarr/Radarr"
         c = self.clients[rec["source"]]
+        # Radarr's RescanMovie reads movieId (no id = every movie); newer builds also take movieIds
         body = ({"name": "RescanSeries", "seriesId": rec["id"]} if rec["source"] == "Sonarr"
-                else {"name": "RescanMovie", "movieIds": [rec["id"]]})
+                else {"name": "RescanMovie", "movieId": rec["id"], "movieIds": [rec["id"]]})
         c.req("POST", "command", body)
         self.episodes.pop(rec["id"], None)
         return f"{rec['source']} rescan queued"

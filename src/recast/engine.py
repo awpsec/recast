@@ -12,16 +12,18 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Callable
 
-from .config import Config, config_dir
+from .config import Config, config_dir, write_atomic
 from .encode import (CODEC_LABEL, EncodeSettings, _audio_indices, _sub_indices, build_command, est_bytes,
-                     resolve_encoder, two_pass)
+                     quality_loss, resolve_encoder, two_pass)
 from .ffmpeg import NO_WINDOW, parse_progress, run
 from .probe import VIDEO_EXT, MediaInfo, probe_now
 
@@ -38,6 +40,10 @@ class Cancelled(Exception):
 
 class NotReplaced(Exception):
     """A safety check stopped the replace; the message says why. Nothing in the library was touched."""
+
+
+class SourceChanged(NotReplaced):
+    """The original moved, vanished or changed (a Sonarr/Radarr upgrade, usually) since it was encoded."""
 
 
 SEASON_RX = re.compile(r"^(season|series|staffel|saison|temporada)\s*\d+$|^s\d{1,2}$|^specials?$", re.I)
@@ -177,6 +183,7 @@ class Engine:
         # per-show preset memory and "already done" skipping. Jobs themselves are pruned.
         self.history: list[dict] = []
         self.state_file = config_dir() / "state.json"
+        self._save_lock = threading.Lock()
         self.load()
 
     # ── persistence ──
@@ -210,14 +217,18 @@ class Engine:
     def save(self, force: bool = False) -> None:
         if not force and (not self._dirty or time.time() - self._last_save < 2):
             return
-        self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        data = {"next_id": self.next_id, "history": self.history[-20000:],
-                "jobs": [{**asdict(j), "spark": j.spark[-60:], "log": j.log[-20:]} for j in self.jobs.values()],
-                "batches": [asdict(b) for b in self.batches.values()]}
-        tmp = self.state_file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data))
-        os.replace(tmp, self.state_file)
-        self._dirty, self._last_save = False, time.time()
+        with self._save_lock:  # snapshot + write as one, so an older snapshot never lands last
+            self._dirty = False
+            text = json.dumps({"next_id": self.next_id, "history": self.history[-20000:],
+                               "jobs": [{**asdict(j), "spark": j.spark[-60:], "log": j.log[-20:]}
+                                        for j in list(self.jobs.values())],
+                               "batches": [asdict(b) for b in list(self.batches.values())]})
+            try:
+                write_atomic(self.state_file, text)
+            except OSError:
+                self._dirty = True
+                raise
+            self._last_save = time.time()
 
     def touch(self) -> None:
         self._dirty = True
@@ -669,6 +680,12 @@ class Engine:
             flags.append(f"subtitle tracks {want_s} → {len(out.subs)}")
         if j.out_size >= j.info.get("size", 0) > 0:
             flags.append("output larger than source")
+        want_h = m.height if s.resolution == "source" or not str(s.resolution).isdigit() \
+            else min(m.height, int(s.resolution))
+        if out.height and want_h and out.height < want_h * 0.9:
+            flags.append(f"resolution {m.height}p → {out.height}p")
+        if m.hdr and m.hdr != "Dolby Vision" and not out.hdr and not quality_loss(s, m):
+            flags.append(f"{m.hdr} lost")  # the preset meant to keep it; players would show it washed out
         if self.cfg.verify_decode and not flags:
             bad = await asyncio.to_thread(self._decode_test, j.out)
             if bad:
@@ -744,6 +761,20 @@ class Engine:
             msg = await asyncio.to_thread(self._replace_files, j, keep_both)
         except Cancelled:
             return
+        except SourceChanged as e:
+            if j.origin in ("auto", "review"):  # Sonarr/Radarr upgraded or removed it: the new file gets its own look
+                j.stage, j.finished, j.result = "discarded", time.time(), f"not replaced: {e}"
+                j.add_log(j.result)
+                self._cleanup(j)
+                self.on_event("source_changed", j)
+                self.touch()
+                self.save(force=True)
+                return
+            j.stage, j.flag, j.waiting_since = "awaiting", f"not replaced: {e}", time.time()
+            j.add_log(j.flag)
+            self.on_event("flagged", j)
+            self.touch()
+            return
         except NotReplaced as e:
             j.stage, j.flag, j.waiting_since = "awaiting", f"not replaced: {e}", time.time()
             j.add_log(j.flag)
@@ -787,31 +818,69 @@ class Engine:
             stem = renamed_for_codec(stem, j.s.codec)
         return stem + (".recast" if keep_both else "") + "." + j.s.container
 
+    def _check_source(self, j: Job) -> os.stat_result:
+        """The original must be exactly what was encoded: same size, same modification time."""
+        try:
+            st = os.stat(j.src)
+        except FileNotFoundError:
+            raise SourceChanged("the original is gone from the library (moved or deleted since?)")
+        if st.st_size != j.info.get("size") or (j.info.get("mtime") and abs(st.st_mtime - j.info["mtime"]) > 2):
+            raise SourceChanged("the original changed since it was encoded (upgraded by Sonarr/Radarr?)")
+        return st
+
+    def _finish_interrupted(self, j: Job, final: str, tmp: str) -> str:
+        """The original isn't in its place. If that's because one of our replaces was cut off between its two
+        renames (power cut, crash, the share dropping), the original is in the trash (or .orig) and the new file
+        sits next to where it was: finish the job rather than leave the episode missing. "" = not that case."""
+        if self.cfg.originals not in ("trash", "keep") or not j.out_size:
+            return ""
+        orig = _find_original(j.src)
+        if not orig or os.path.getsize(orig) != j.info.get("size"):
+            return ""
+        if os.path.exists(tmp) and os.path.getsize(tmp) == j.out_size:
+            os.replace(tmp, final)
+        elif not (os.path.exists(final) and os.path.getsize(final) == j.out_size):
+            return ""
+        j.final, j.orig = final, orig
+        return "replaced · finished a replace that was interrupted · original " + \
+            ("in .recast-trash" if ".recast-trash" in orig else "kept as .orig")
+
     def _replace_files(self, j: Job, keep_both: bool) -> str:
         src = j.src
         d = os.path.dirname(src)
         final = os.path.join(d, self.target_name(j, keep_both))
+        tmp = os.path.join(d, f".recast-{j.id}.{j.s.container}.part")
+        if not keep_both and not os.path.exists(src) and (done := self._finish_interrupted(j, final, tmp)):
+            return done
+        _rm(tmp)  # left over from an attempt that was cut off before it renamed anything
         # ── safety checks: anything off here leaves the library exactly as it was ──
-        try:
-            st = os.stat(src)
-        except FileNotFoundError:
-            raise NotReplaced("the original is gone from the library (moved or deleted since?)")
-        if st.st_size != j.info.get("size") or (j.info.get("mtime") and abs(st.st_mtime - j.info["mtime"]) > 2):
-            raise NotReplaced("the original changed since it was encoded (upgraded by Sonarr/Radarr?)")
+        self._check_source(j)
         if norm(final) != norm(src) and os.path.exists(final):
             raise NotReplaced(f"{os.path.basename(final)} already exists next to it")
         free = _free(d)
         if free is not None and free < j.out_size + 256 * 1024**2:
             raise NotReplaced(f"not enough free space on the library drive ({free / 1024**3:.1f} GiB)")
-        tmp = os.path.join(d, f".recast-{j.id}.{j.s.container}.part")
+        moved = False
         try:
             if j.remote or not _same_device(j.out, d):
                 self._copy_file(j.out, tmp, j, "replace_done")
             else:
                 shutil.move(j.out, tmp)
-                j.replace_done = j.out_size
+                moved, j.replace_done = True, j.out_size
+            # again: writing back can take minutes, and Sonarr/Radarr may have upgraded the file meanwhile
+            st = self._check_source(j)
+            try:  # same permissions as the file it replaces (a share may not allow it; that's fine)
+                os.chmod(tmp, stat.S_IMODE(st.st_mode))
+            except OSError:
+                pass
         except BaseException:
-            _rm(tmp)
+            if moved:  # the encode itself was moved, not copied: put it back in scratch
+                try:
+                    shutil.move(tmp, j.out)
+                except OSError:
+                    _rm(tmp)
+            else:
+                _rm(tmp)
             raise
         if keep_both:
             os.replace(tmp, final)
@@ -867,6 +936,7 @@ class Engine:
             elif j.stage == "awaiting":
                 j.stage, j.finished = "discarded", time.time()
                 self._cleanup(j)
+                self.on_event("discarded", j)
         self.touch()
         self.save(force=True)
 

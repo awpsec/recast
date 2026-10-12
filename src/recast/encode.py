@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from .config import EncoderCap, config_dir
+from .config import EncoderCap, config_dir, write_atomic
 
 if TYPE_CHECKING:
     from .probe import MediaInfo
@@ -526,10 +526,9 @@ def load_presets() -> dict[str, tuple[str, EncodeSettings]]:
 
 def save_preset(name: str, desc: str, s: EncodeSettings, old_name: str | None = None) -> None:
     d = presets_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    if old_name and old_name != name:
+    write_atomic(d / f"{_slug(name)}.json", json.dumps(preset_doc(name, desc, s), indent=2, ensure_ascii=False))
+    if old_name and _slug(old_name) != _slug(name):  # the new file first: a rename never loses the preset
         (d / f"{_slug(old_name)}.json").unlink(missing_ok=True)
-    (d / f"{_slug(name)}.json").write_text(json.dumps(preset_doc(name, desc, s), indent=2, ensure_ascii=False))
 
 
 def delete_preset(name: str) -> None:

@@ -167,7 +167,7 @@ def create_app(svc: Service, host: str = "127.0.0.1", port: int = 8484, auto_det
         if not svc.cfg.needs_setup:
             svc.cfg.save()
     app["clients"]: set[asyncio.Queue] = set()
-    app["sessions"]: set[str] = set()
+    app["revoked"]: set[str] = set()  # signed out before they expired
     app["setup"] = {"lines": [], "running": False, "caps": None}
     app["folder_probes"] = set()
     app["rt"] = {"loop": None, "runner": None, "sweeping": False, "tasks": set(), "update": None}  # mutable after start
@@ -228,6 +228,8 @@ def create_app(svc: Service, host: str = "127.0.0.1", port: int = 8484, auto_det
     r.add_get("/api/settings", _settings)
     r.add_put("/api/settings", _settings_put)
     r.add_post("/api/arr/{kind}/test", _arr_test)
+    r.add_get("/api/arr/webhooks", _arr_webhooks)
+    r.add_post("/api/arr/{kind}/webhook", _arr_webhook)
     r.add_post("/api/password", _password)
     r.add_get("/api/history", _history)
     r.add_post("/api/history/restore", _restore)
@@ -247,7 +249,7 @@ PUBLIC = ("/login", "/api/login", "/static/", "/api/hook/", "/api/health")
 async def _auth_middleware(request: web.Request, handler):
     svc: Service = request.app["svc"]
     if svc.cfg.web_password_hash and not any(request.path == p or request.path.startswith(p) for p in PUBLIC):
-        if request.cookies.get(SESSION_COOKIE) not in request.app["sessions"]:
+        if not _session_ok(request):
             if request.path.startswith("/api/"):
                 return _err("login required", 401)
             raise web.HTTPFound("/login")
@@ -261,21 +263,44 @@ async def _auth_middleware(request: web.Request, handler):
         return _err(f"{type(e).__name__}: {e}", 500)
 
 
+SESSION_DAYS = 30
+
+
+def _sign(svc: Service, msg: str) -> str:
+    cfg = svc.cfg
+    if not cfg.session_secret:
+        cfg.session_secret = secrets.token_hex(32)
+        cfg.save()
+    return hmac.new(cfg.session_secret.encode(), msg.encode(), hashlib.sha256).hexdigest()[:40]
+
+
+def _signed_in(svc: Service, resp: web.Response) -> web.Response:
+    """A session is "<expiry>.<signature>": nothing to store, so it survives restarts and updates."""
+    exp = str(int(time.time()) + SESSION_DAYS * 86400)
+    resp.set_cookie(SESSION_COOKIE, f"{exp}.{_sign(svc, exp)}", httponly=True, samesite="Strict",
+                    max_age=SESSION_DAYS * 86400)
+    return resp
+
+
+def _session_ok(request: web.Request) -> bool:
+    tok = request.cookies.get(SESSION_COOKIE, "")
+    exp, _, sig = tok.partition(".")
+    if not exp.isdigit() or int(exp) < time.time() or tok in request.app["revoked"]:
+        return False
+    return hmac.compare_digest(sig, _sign(request.app["svc"], exp))
+
+
 async def _login(request):
     svc: Service = request.app["svc"]
     body = await request.json()
     if not svc.cfg.web_password_hash or _check_pw(body.get("password", ""), svc.cfg.web_password_hash):
-        token = secrets.token_urlsafe(24)
-        request.app["sessions"].add(token)
-        resp = _ok()
-        resp.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="Strict", max_age=30 * 86400)
-        return resp
+        return _signed_in(svc, _ok())
     await asyncio.sleep(1)  # slow down guessing
     return _err("wrong password", 401)
 
 
 async def _logout(request):
-    request.app["sessions"].discard(request.cookies.get(SESSION_COOKIE))
+    request.app["revoked"].add(request.cookies.get(SESSION_COOKIE, ""))
     resp = _ok()
     resp.del_cookie(SESSION_COOKIE)
     return resp
@@ -286,14 +311,10 @@ async def _password(request):
     body = await request.json()
     pw = body.get("password", "")
     svc.cfg.web_password_hash = _hash_pw(pw) if pw else ""
+    svc.cfg.session_secret = secrets.token_hex(32)  # every other browser has to sign in again
     svc.cfg.save()
-    request.app["sessions"].clear()
-    if pw:  # keep the person who set it logged in
-        token = secrets.token_urlsafe(24)
-        request.app["sessions"].add(token)
-        resp = _ok(protected=True)
-        resp.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="Strict", max_age=30 * 86400)
-        return resp
+    if pw:  # keep the person who set it signed in
+        return _signed_in(svc, _ok(protected=True))
     return _ok(protected=False)
 
 
@@ -752,6 +773,7 @@ async def _automation(request):
                 "review": sorted(review, key=lambda p: -(p["size"] - p["est_out"]))[:300],
                 "review_total": len(review), "review_reasons": reasons,
                 "log": a.log[-150:][::-1], "last_sweep": a.last_sweep, "pending": a.pending,
+                "last_hook": a.last_hook,
                 "hooks": _hook_urls(request), "presets": list(svc.presets), "default_preset": cfg.default_preset,
                 "excluded": cfg.auto_exclude,
                 "arr": {"sonarr": cfg.sonarr.enabled, "radarr": cfg.radarr.enabled,
@@ -880,7 +902,7 @@ async def _hook(request):
         return _err("expected JSON")
     path = svc.automation.webhook(kind, payload)
     if path and svc.arr and not svc.arr.lookup(path) and time.time() - svc.arr.refreshed > 300:
-        _spawn(request.app, asyncio.to_thread(svc.arr.refresh), "arr")  # something Sonarr/Radarr just added
+        _spawn(request.app, asyncio.to_thread(svc.refresh_arr), "arr")  # something Sonarr/Radarr just added
     return _ok(path=path)
 
 
@@ -905,12 +927,32 @@ async def _preset_put(request):
     except (ValueError, TypeError) as e:
         return _err(str(e))
     old = body.get("old_name")
+    cfg = svc.cfg
+    if name != old and name in svc.presets:
+        return _err(f"there's already a preset called {name}")
     save_preset(name, body.get("description", ""), s, old_name=old)
-    if old and old != name and svc.cfg.default_preset == old:
-        svc.cfg.default_preset = name
-        svc.cfg.save()
+    if old and old != name:  # a rename: everything that pointed at the old name follows it
+        cfg.default_preset = name if cfg.default_preset == old else cfg.default_preset
+        cfg.auto_preset = name if cfg.auto_preset == old else cfg.auto_preset
+        for r in cfg.auto_rules:
+            if r.get("preset") == old:
+                r["preset"] = name
+        cfg.save()
     svc.reload_presets()
+    if _preset_uses(cfg, name, default_counts=True):  # automation's scores depend on these settings
+        await asyncio.to_thread(svc.automation.reset_decisions)
     return _ok(warning=resolve_encoder(s, svc.cfg.encoders)[1] if s.encoder != "auto" else "")
+
+
+def _preset_uses(cfg, name: str, default_counts: bool = False) -> list[str]:
+    """What automation uses this preset for (empty = nothing)."""
+    uses = []
+    if cfg.auto_preset == name or (default_counts and not cfg.auto_preset and cfg.default_preset == name):
+        uses.append("automation's preferred preset")
+    n = sum(1 for r in cfg.auto_rules if r.get("preset") == name)
+    if n:
+        uses.append(f"{n} automation rule{'s' if n > 1 else ''}")
+    return uses
 
 
 async def _preset_delete(request):
@@ -918,6 +960,9 @@ async def _preset_delete(request):
     name = request.query.get("name", "")
     if name == svc.cfg.default_preset or len(svc.presets) <= 1:
         return _err("can't delete the default (or last) preset")
+    uses = _preset_uses(svc.cfg, name)
+    if uses:
+        return _err(f"{name} is {' and '.join(uses)} — pick another there first (Automation page)")
     delete_preset(name)
     svc.reload_presets()
     return _ok()
@@ -931,6 +976,8 @@ async def _preset_default(request):
     svc.cfg.default_preset = body["name"]
     svc.cfg.save()
     svc.scanner.publish(svc.cfg.roots[0].path) if svc.cfg.roots else None
+    if not svc.cfg.auto_preset:  # automation follows the default
+        await asyncio.to_thread(svc.automation.reset_decisions)
     return _ok()
 
 
@@ -953,10 +1000,41 @@ async def _settings(request):
                 "suggestions": await asyncio.to_thread(suggest_libraries)})
 
 
+def _clean_settings(body: dict, svc: Service) -> str:
+    """Normalise the plain settings in `body` in place. Returns an error message, or ""."""
+    try:
+        for k in ("max_scratch_gb", "trash_days", "trash_max_gb", "min_free_gb"):
+            if k in body:
+                body[k] = int(float(body[k]))
+                if body[k] < (1 if k in ("max_scratch_gb", "trash_days") else 0):
+                    return f"{k.replace('_', ' ')} can't be {body[k]}"
+    except (TypeError, ValueError):
+        return "that needs a number"
+    if "originals" in body and body["originals"] not in ("trash", "keep", "delete"):
+        return "originals must be trash, keep or delete"
+    if "default_preset" in body and body["default_preset"] not in svc.presets:
+        return "unknown preset"
+    if "scratch" in body:
+        p = os.path.abspath(os.path.expanduser(str(body["scratch"]).strip()))
+        try:
+            os.makedirs(p, exist_ok=True)
+            probe = os.path.join(p, ".recast-write-test")
+            with open(probe, "w"):
+                pass
+            os.remove(probe)
+        except OSError as e:
+            return f"can't use {p} for scratch: {e.strerror or e}"
+        body["scratch"] = p
+    return ""
+
+
 async def _settings_put(request):
     svc: Service = request.app["svc"]
     body = await request.json()
     cfg = svc.cfg
+    bad = _clean_settings(body, svc)
+    if bad:
+        return _err(bad)
     for k in SETTING_KEYS:
         if k in body:
             setattr(cfg, k, type(getattr(cfg, k))(body[k]) if not isinstance(getattr(cfg, k), bool) else bool(body[k]))
@@ -978,9 +1056,11 @@ async def _settings_put(request):
             if body[kind].get("clear"):
                 a.url, a.api_key, a.path_map = "", "", []
     cfg.save()
+    if "default_preset" in body and not cfg.auto_preset:  # automation follows the default
+        await asyncio.to_thread(svc.automation.reset_decisions)
     if "sonarr" in body or "radarr" in body:
         if svc.connect_arr():
-            _spawn(request.app, asyncio.to_thread(svc.arr.refresh), "arr")
+            _spawn(request.app, asyncio.to_thread(svc.refresh_arr), "arr")
     return _ok()
 
 
@@ -1002,8 +1082,48 @@ async def _arr_test(request):
         a.path_map = pairs
         svc.cfg.save()
     if svc.connect_arr():
-        _spawn(request.app, asyncio.to_thread(svc.arr.refresh), "arr")
+        _spawn(request.app, asyncio.to_thread(svc.refresh_arr), "arr")
     return _ok(version=st.get("version", ""), path_map=pairs)
+
+
+async def _arr_webhooks(request):
+    """Is recast's webhook set up in Sonarr/Radarr, pointing at the address this browser uses?"""
+    svc: Service = request.app["svc"]
+    urls = _hook_urls(request)
+
+    def check(kind: str) -> dict:
+        a = getattr(svc.cfg, kind)
+        if not a.enabled:
+            return {"connected": False}
+        try:
+            n = ArrClient(kind.title(), a).find_webhook()
+        except ArrError as e:
+            return {"connected": True, "error": str(e)}
+        current = bool(n) and next((f.get("value") for f in n.get("fields", []) if f.get("name") == "url"), "")
+        return {"connected": True, "installed": bool(n), "current": current == urls[kind]}
+    out = await asyncio.gather(*(asyncio.to_thread(check, k) for k in ("sonarr", "radarr")))
+    return _ok(sonarr=out[0], radarr=out[1], urls=urls)
+
+
+async def _arr_webhook(request):
+    """Add recast's webhook to Sonarr/Radarr (or fix its address). They test it while saving."""
+    svc: Service = request.app["svc"]
+    kind = request.match_info["kind"]
+    if kind not in ("sonarr", "radarr"):
+        return _err("unknown")
+    a = getattr(svc.cfg, kind)
+    if not a.enabled:
+        return _err(f"connect {kind.title()} in Settings first")
+    url = _hook_urls(request)[kind]
+    try:
+        result = await asyncio.to_thread(ArrClient(kind.title(), a).install_webhook, url)
+    except ArrError as e:
+        msg = str(e)
+        if "HTTP 400" in msg:
+            msg += f" — {kind.title()} couldn't reach recast at {url.split('/api/')[0]}; open recast by an address " \
+                   f"{kind.title()} can reach (e.g. the server's IP) and try again"
+        return _err(msg)
+    return _ok(result=result, url=url)
 
 
 # ── history ──
@@ -1165,7 +1285,7 @@ async def _service_start(app):
         svc.automation.last_sweep = min(svc.scanner.snap_when.values())  # app) counts: no NAS re-list now
     await asyncio.to_thread(svc.automation.rebuild)
     if svc.connect_arr():
-        _spawn(app, asyncio.to_thread(svc.arr.refresh), "arr")
+        _spawn(app, asyncio.to_thread(svc.refresh_arr), "arr")
     if svc.automation.sweep_due():
         _spawn(app, _run_sweep(app), "sweep")
     await asyncio.to_thread(svc.engine.clean_scratch)
@@ -1194,7 +1314,7 @@ async def _service_loop(app):
                     await asyncio.to_thread(svc.probes.save)
                     svc.automation.save()
                 if n % 14400 == 0 and n and svc.arr:
-                    _spawn(app, asyncio.to_thread(svc.arr.refresh), "arr")
+                    _spawn(app, asyncio.to_thread(svc.refresh_arr), "arr")
                 if n % 14400 == 0 and n:  # hourly (also enforces the trash size cap soon after replaces)
                     _spawn(app, asyncio.to_thread(svc.engine.purge_trash), "trash")
             if n % 345600 == 0 and not os.environ.get("RECAST_NO_UPDATE_CHECK"):  # daily: newer release?

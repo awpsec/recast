@@ -442,7 +442,8 @@ PAGES.dashboard = async (pg) => {
   const nextBox = h("div", { class: "list" }), nextMeta = meta("");
   const logBox = h("div", { class: "list log" });
   const chartBox = h("div");
-  pg.el.append(tiles,
+  const startBox = h("div");
+  pg.el.append(startBox, tiles,
     sec(secHead("Now", h("a", { href: "#/queue", class: "btn ghost sm" }, "Queue →")), nowBox),
     sec(secHead("Up next", nextMeta, h("a", { href: "#/automation", class: "btn ghost sm" }, "Automation →")), nextBox),
     sec(secHead("Space saved per day", meta("last 30 days")), chartBox),
@@ -482,15 +483,32 @@ PAGES.dashboard = async (pg) => {
     logBox.replaceChildren(...(log.length ? log.slice(0, 10).map(logItem) : [h("div", { class: "empty" }, "No activity yet.")]));
   };
 
+  const drawStart = (a) => {
+    const arr = a.arr.sonarr || a.arr.radarr;
+    const steps = [
+      [info.scanned, "Read the library", "the first time takes a while; it's cached after that", "#/library"],
+      [arr, "Connect Sonarr / Radarr", "optional — show names, genre and tag rules, rescans after replacing", "#/settings"],
+      [Object.keys(a.last_hook || {}).length > 0, "Add the webhooks", arr ? "one click on the Automation page" : "new downloads get looked at right after import", "#/automation"],
+      [a.settings.auto_mode === "on", "Turn on automation", a.settings.auto_mode === "dry"
+        ? "it's in Dry run — switch it to On once its plans look right" : "start with Dry run to see what it would do", "#/automation"],
+    ];
+    if (store.get("start-hidden") || steps.every((x) => x[0])) { startBox.replaceChildren(); return; }
+    startBox.replaceChildren(sec(secHead("Get started", h("button", { class: "btn ghost sm", onclick: () => { store.set("start-hidden", true); drawStart(a); } }, "Hide")),
+      h("div", { class: "list" }, steps.map(([done, title, sub, href]) => h("a", { class: "item", href },
+        h("span", { class: done ? "green" : "dim", style: "width:18px;flex:none" }, done ? "✓" : "○"),
+        h("span", { class: done ? "dim" : "", style: "font-weight:500" }, title),
+        done ? null : h("span", { class: "dim trunc grow hide-sm" }, sub))))));
+  };
+
   const [a, hs] = await Promise.all([api("/api/automation"), api("/api/history")]);
   if (!pg.alive) return;
   hist = hs.history;
-  drawTiles(); drawNow((S.live && S.live.active) || []); drawNext(a); drawLog(a.log);
+  drawStart(a); drawTiles(); drawNow((S.live && S.live.active) || []); drawNext(a); drawLog(a.log);
   chartBox.append(savingsChart(hist));
   pg.onLive = (l) => { drawTiles(); drawNow(l.active); };
   pg.every(10000, async () => {
     const a2 = await api("/api/automation").catch(() => null);
-    if (a2 && pg.alive) { drawNext(a2); drawLog(a2.log); }
+    if (a2 && pg.alive) { drawStart(a2); drawNext(a2); drawLog(a2.log); }
   });
   pg.onEvent = async (m) => {
     if (m.kind === "replaced") { const h2 = await api("/api/history").catch(() => null); if (h2 && pg.alive) { hist = h2.history; drawTiles(); chartBox.replaceChildren(savingsChart(hist)); } }
@@ -542,6 +560,8 @@ function logItem(e) {
     replaced: ["green", "Replaced", `saved ${fsize(e.saved)} (−${pct(e.pct)})`],
     "needs-you": ["amber", "Waiting for you", e.why || ""],
     failed: ["red", "Failed", e.error || ""],
+    discarded: ["", "Discarded", "won't be redone unless the file changes"],
+    changed: ["", "Dropped", e.why || "the original changed"],
     skip: ["", "Skipped", e.reason || ""],
     webhook: ["", `${(e.source || "").replace(/^./, (c) => c.toUpperCase())} imported`, "looking at it shortly"],
     "webhook-test": ["green", `${(e.source || "").replace(/^./, (c) => c.toUpperCase())} test webhook received`, "connection works"],
@@ -1008,7 +1028,11 @@ PAGES.review = async (pg) => {
       h("span", { class: "num muted nowrap hide-sm" }, `${fsize(j.src_size)} → ${fsize(j.out_size)}`),
       h("span", { class: "num nowrap", style: "width:48px;text-align:right" }, shrink(j.src_size, j.out_size)),
       h("button", { class: "btn sm go", onclick: stop(async () => { if (await act(() => post(`/api/inbox/job/${j.id}/approve`))) { toast("Replacing — the original goes to recast's trash.", "green"); load(); } }) }, j.flag ? "Replace anyway" : "Replace"),
-      h("button", { class: "btn sm danger", onclick: stop(async () => { if (await act(() => post(`/api/inbox/job/${j.id}/deny`))) load(); }) }, "Discard"));
+      h("button", { class: "btn sm danger", onclick: stop(async () => {
+        if (!(await act(() => post(`/api/inbox/job/${j.id}/deny`)))) return;
+        if (j.origin !== "manual") toast("Discarded — automation won't redo this file unless it changes.", "", 4000);
+        load();
+      }) }, "Discard"));
     const detail = () => h("div", { class: "rv" }, compareView(j),
       h("div", { class: "rv-info small" },
         h("div", {}, h("span", { class: "dim" }, "Preset "), j.preset),
@@ -1104,7 +1128,7 @@ PAGES.automation = async (pg) => {
   const modeHelp = {
     off: "Nothing happens on its own. You encode from the Library.",
     dry: "Decides what it would do and shows it here, but encodes nothing. Good for checking your thresholds first.",
-    ask: "Encodes clear wins one at a time, then each one waits in the Inbox for your OK before it replaces anything.",
+    ask: "Encodes clear wins one at a time, then each one waits in Review for your OK before it replaces anything.",
     on: "Encodes clear wins one at a time and replaces them by itself; borderline files wait in Review.",
   };
   const seg = h("div", { class: "seg" });
@@ -1113,7 +1137,7 @@ PAGES.automation = async (pg) => {
   const drawMode = () => {
     seg.replaceChildren(...MODES.map((m) => h("button", { class: (s.auto_mode === m ? "on " + MODE[m][1] : ""), onclick: async () => {
       if (m === "on" && s.auto_mode !== "on" && !(await confirmBox("Turn on automation?",
-        `recast will encode files whose estimated saving is at least ${pct(s.auto_threshold)} with ${s.auto_preset || d.default_preset}, one at a time, and replace each original once the real result also clears that bar and passes every check. Originals go to recast's trash first.`, "Turn on", "go"))) return;
+        `recast will encode files whose estimated saving is at least ${pct(s.auto_threshold)} with ${s.auto_preset || d.default_preset}${(s.auto_rules || []).length ? " (or the preset a rule picks)" : ""}, one at a time, and replace each original once the real result also clears that bar and passes every check. Originals wait in recast's trash, so any replace can be undone.`, "Turn on", "go"))) return;
       if (await save({ auto_mode: m })) { drawMode(); refreshPreview(); }
     } }, MODE[m][0])));
     help.textContent = modeHelp[s.auto_mode];
@@ -1257,6 +1281,39 @@ PAGES.automation = async (pg) => {
     catch { toast("Couldn't copy — select the text instead.", "amber"); }
   } }, "Copy")));
 
+  // webhooks: one click when Sonarr/Radarr are connected (they test it while saving)
+  const hookBoxes = {};
+  let hookState = null;
+  const hookRow = (kind, label) => {
+    hookBoxes[kind] = h("div", { class: "row wrap" }, h("span", { class: "dim small" }, d.arr[kind] ? "checking…" : ""));
+    return fieldRow(label, null, hookBoxes[kind]);
+  };
+  const drawHooks = () => {
+    for (const [kind, label] of [["sonarr", "Sonarr"], ["radarr", "Radarr"]]) {
+      const st = (hookState || {})[kind] || { connected: d.arr[kind] };
+      const last = (d.last_hook || {})[kind];
+      const add = (text) => h("button", { class: "btn sm primary", onclick: async (e) => {
+        e.target.disabled = true; e.target.textContent = `Asking ${label}…`;
+        const r = await act(() => post(`/api/arr/${kind}/webhook`));
+        if (r) toast(r.result === "already set" ? `${label} already has it` : `${label} webhook ${r.result} — ${label} sent a test and recast got it`, "green", 6000);
+        await loadHooks();
+        const a = await api("/api/automation").catch(() => null);  // its test call shows in Activity right away
+        if (a && pg.alive) drawSide(a);
+      } }, text);
+      hookBoxes[kind].replaceChildren(...(!st.connected
+        ? [h("span", { class: "dim small" }, `Connect ${label} in `, h("a", { href: "#/settings" }, "Settings"), " first — or set it up by hand below.")]
+        : st.error ? [h("span", { class: "amber small" }, st.error), add(`Add webhook to ${label}`)]
+          : st.installed && st.current ? [h("span", { class: "green small" }, "✓ Webhook set up"), last ? h("span", { class: "dim small" }, `· last call ${ago(last)}`) : ""]
+            : st.installed ? [h("span", { class: "amber small" }, "Points at another address"), add("Fix it")]
+              : hookState ? [add(`Add webhook to ${label}`)] : [h("span", { class: "dim small" }, "checking…")]));
+    }
+  };
+  const loadHooks = async () => {
+    if (!d.arr.sonarr && !d.arr.radarr) { hookState = {}; drawHooks(); return; }
+    hookState = await api("/api/arr/webhooks").catch(() => ({}));
+    if (pg.alive) drawHooks();
+  };
+
   const queueBox = h("div", { class: "list" }), queueMeta = meta(""), logBox = h("div", { class: "list log" });
   let logN = 15;
   const drawSide = (a) => {
@@ -1269,6 +1326,8 @@ PAGES.automation = async (pg) => {
     lastSweep.textContent = a.last_sweep ? `last ${ago(a.last_sweep)}` : "never";
     clock = a.clock || clock;
     drawClock();
+    d.last_hook = a.last_hook;
+    if (hookState) drawHooks();
   };
   const lastSweep = h("span", { class: "dim small" });
 
@@ -1298,17 +1357,19 @@ PAGES.automation = async (pg) => {
       h("p", { class: "lead" }, "Shows or folders automation never touches. Exclude one from its details in the ", h("a", { href: "#/library" }, "Library"), " — encoding it by hand still works."),
       exclBox),
     sec("Sonarr & Radarr",
-      h("p", { class: "lead" }, "Point a webhook at recast and new downloads are looked at ~90 s after import, ahead of everything else."),
-      fields(copyRow("Sonarr webhook", d.hooks.sonarr), copyRow("Radarr webhook", d.hooks.radarr)),
-      h("ol", { class: "steps" },
-        h("li", {}, "In Sonarr/Radarr: ", h("b", {}, "Settings → Connect → + → Webhook")),
-        h("li", {}, "Paste the URL, method ", h("b", {}, "POST"), ", triggers ", h("b", {}, "On Import"), " and ", h("b", {}, "On Upgrade")),
-        h("li", {}, "Press ", h("b", {}, "Test"), " — it shows up in Activity below")),
-      !d.arr.sonarr && !d.arr.radarr ? h("p", { class: "amber small", style: "margin-top:10px" }, "Also add their URL + API key in ", h("a", { href: "#/settings" }, "Settings"), " so recast can map their paths to yours, match preset rules, and trigger a rescan after replacing.") : ""),
+      h("p", { class: "lead" }, "With a webhook, new downloads are looked at ~90 s after import, ahead of everything else."),
+      fields(hookRow("sonarr", "Sonarr"), hookRow("radarr", "Radarr")),
+      h("details", { style: "margin-top:12px" }, h("summary", { class: "small" }, "Set it up by hand instead"),
+        fields(copyRow("Sonarr webhook", d.hooks.sonarr), copyRow("Radarr webhook", d.hooks.radarr)),
+        h("ol", { class: "steps" },
+          h("li", {}, "In Sonarr/Radarr: ", h("b", {}, "Settings → Connect → + → Webhook")),
+          h("li", {}, "Paste the URL, method ", h("b", {}, "POST"), ", triggers ", h("b", {}, "On Import"), " and ", h("b", {}, "On Upgrade")),
+          h("li", {}, "Press ", h("b", {}, "Test"), " — it shows up in Activity below")))),
     sec("Activity", logBox));
   drawSide(d);
   drawExcl(d.excluded);
   refreshPreview();
+  loadHooks();
   pg.every(5000, async () => { const a = await api("/api/automation").catch(() => null); if (a && pg.alive) drawSide(a); });
 };
 
@@ -1487,7 +1548,13 @@ PAGES.settings = async (pg) => {
         const r = await act(() => post(`/api/arr/${kind}/test`));
         if (r) {
           key.value = ""; key.placeholder = "saved — type to replace";
-          out.replaceChildren(h("span", { class: "green" }, `✓ Connected · ${label} ${r.version}`),
+          const hookBtn = h("button", { class: "btn sm", onclick: async () => {
+            hookBtn.disabled = true;
+            const w = await act(() => post(`/api/arr/${kind}/webhook`));
+            hookBtn.replaceWith(w ? h("span", { class: "green" }, w.result === "already set" ? " ✓ webhook already set up" : ` ✓ webhook ${w.result}`) : hookBtn);
+            hookBtn.disabled = false;
+          } }, `Add recast's webhook to ${label}`);
+          out.replaceChildren(h("div", { class: "row wrap" }, h("span", { class: "green" }, `✓ Connected · ${label} ${r.version}`), hookBtn),
             r.path_map.length ? h("div", { class: "muted" }, "Paths: " + r.path_map.map(([x, y]) => `${x} → ${y}`).join(" · ")) : h("div", { class: "amber" }, `Couldn't match ${label}'s folders to your library folders — webhooks need matching paths.`));
         } else out.replaceChildren(h("span", { class: "red" }, "✗ Couldn't connect — check the URL and key."));
       }
@@ -1542,14 +1609,14 @@ PAGES.settings = async (pg) => {
       fieldRow("Empty the trash after", "originals stay on the share until then — that's what makes restore instant", h("input", { type: "number", min: 1, value: st.trash_days, onchange: (e) => saveKey("trash_days", Number(e.target.value)) }), "days"),
       fieldRow("Trash size limit", "purge the oldest days early when the trash holds more than this (0 = no limit)", h("input", { type: "number", min: 0, value: st.trash_max_gb, onchange: (e) => saveKey("trash_max_gb", Number(e.target.value)) }), "GB"),
       fieldRow("Keep free on the library drive", "automation pauses below this — replaced originals use space until they're purged", h("input", { type: "number", min: 0, value: st.min_free_gb, onchange: (e) => saveKey("min_free_gb", Number(e.target.value)) }), "GB"),
-      fieldRow("Decode test", "decode the whole output once before it can replace anything", chk("verify_decode")),
+      fieldRow("Decode test", "decode the start and end of every encode before it can replace anything", chk("verify_decode")),
       fieldRow("Rename codec in file names", "“… AV1.mkv” → “… HEVC.mkv”", chk("rename_codec")),
       fieldRow("Rescan Sonarr/Radarr after replacing", null, chk("rescan_after_replace")),
       fieldRow("Keep the computer awake", "while jobs run", chk("keep_awake")),
       fieldRow("Default preset", "used for ranking and as the starting choice",
         h("select", { onchange: async (e) => { await saveKey("default_preset", e.target.value); S.info.default_preset = e.target.value; } },
           (await getPresets()).presets.map((p) => h("option", { value: p.name, selected: p.name === st.default_preset }, p.name)))))),
-    sec("Sonarr & Radarr", h("p", { class: "lead" }, "Optional. Adds show names and episode titles, spots anime, maps their paths to yours for webhooks, and triggers a rescan after a replace."),
+    sec("Sonarr & Radarr", h("p", { class: "lead" }, "Optional. Adds show names and episode titles, lets preset rules use their genres and tags, sets up webhooks, and has them rescan after a replace."),
       fields(arrCard("sonarr", "Sonarr"), arrCard("radarr", "Radarr"))),
     sec("Security", h("p", { class: "lead" }, d.protected ? "A password is required to open recast in a browser." : "No password. Fine when recast only listens on this computer (the default); set one before exposing it to your network."), secBox),
     sec("This machine",
@@ -1576,16 +1643,23 @@ PAGES.setup = async (pg) => {
   const lines = h("pre", { class: "lines" + (d.lines.length ? "" : " hidden") }, d.lines.join("\n"));
   let detected = d.detected;
   const detectState = h("span", { class: detected ? "green" : "muted" }, detected ? "✓ done" : "");
-  const detectBtn = h("button", { class: "btn " + (detected ? "" : "primary"), onclick: async () => {
-    if (!(await act(() => post("/api/setup/detect")))) return;
+  const follow = () => {
     detectBtn.disabled = true; lines.classList.remove("hidden"); detectState.textContent = "testing each encoder for 2 s…";
     const poll = setInterval(async () => {
       const s = await api("/api/setup").catch(() => null);
       if (!s) return;
       lines.textContent = s.lines.join("\n"); lines.scrollTop = lines.scrollHeight;
-      if (!s.running) { clearInterval(poll); detectBtn.disabled = false; detected = s.detected; detectState.textContent = detected ? "✓ done" : "failed"; detectState.className = detected ? "green" : "red"; detectBtn.textContent = "Detect again"; detectBtn.className = "btn"; }
+      if (s.running) return;
+      clearInterval(poll); detectBtn.disabled = false; detected = s.detected; detectState.textContent = detected ? "✓ done" : "failed"; detectState.className = detected ? "green" : "red"; detectBtn.textContent = "Detect again"; detectBtn.className = "btn";
+      if (!s.needs_setup) {  // libraries came from the environment (Docker): nothing left to ask
+        S.info = await api("/api/state"); renderShell(); location.hash = "#/dashboard"; route();
+        toast("All set — recast is reading your library. Automation stays off until you turn it on.", "green", 8000);
+      }
     }, 600);
     pg.timers.push(poll);
+  };
+  const detectBtn = h("button", { class: "btn " + (detected ? "" : "primary"), onclick: async () => {
+    if (await act(() => post("/api/setup/detect"))) follow();
   } }, detected ? "Detect again" : "Detect hardware");
   const chips = h("div", { class: "chips" });
   const drawChips = () => chips.replaceChildren(...[...new Set([...d.suggestions, ...picked])].map((p) =>
@@ -1609,6 +1683,7 @@ PAGES.setup = async (pg) => {
       chips, h("div", { class: "row", style: "margin-top:10px" }, manual, h("button", { class: "btn", onclick: () => { if (manual.value.trim()) { picked.add(manual.value.trim()); manual.value = ""; drawChips(); } } }, "Add"))),
     sec("3 · Scratch folder", h("p", { class: "lead" }, "A folder on a local disk with room for a few episodes."), scratch),
     h("div", { class: "row", style: "border-top:1px solid var(--border);padding-top:14px" }, h("span", { class: "spacer" }), finish))));
+  if (d.running) follow();
 };
 
 // ───────────────────────────── login / boot ─────────────────────────────

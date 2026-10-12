@@ -6,7 +6,7 @@ import os
 import threading
 from dataclasses import asdict, dataclass, field
 
-from .config import config_dir
+from .config import config_dir, write_atomic
 from .ffmpeg import run
 
 CODEC_NAMES = {"av1": "AV1", "hevc": "HEVC", "h264": "H.264", "vc1": "VC-1", "mpeg2video": "MPEG-2",
@@ -185,10 +185,7 @@ class ProbeCache:
         with self._lock:
             if not self._dirty:
                 return
-            self.file.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.file.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self._data))
-            os.replace(tmp, self.file)
+            write_atomic(self.file, json.dumps(self._data))
             self._dirty = False
 
 

@@ -26,11 +26,12 @@ import time
 from dataclasses import replace
 from datetime import datetime, timedelta
 
-from .config import config_dir
+from .config import config_dir, write_atomic
 from .encode import EncodeSettings, est_bytes, quality_loss, skip_reason
 from .engine import ACTIVE, ASK_FIRST, norm, show_root
 
 MODES = ("off", "dry", "ask", "on")
+SETTLE = 600  # a file found by a sweep that changed this recently may still be arriving: look again later
 
 RULE_BY = ("type", "genre", "tag", "source")  # Sonarr series type · genre · tag · everything from Sonarr/Radarr
 
@@ -97,9 +98,11 @@ class Automation:
         self.log: list[dict] = []          # what it did / decided, newest last
         self.pending: list[dict] = []      # files Sonarr/Radarr just imported, looked at after a short delay
         self.last_sweep = 0.0
+        self.last_hook: dict[str, float] = {}  # "sonarr"/"radarr" → when its last webhook arrived
         self.status = "off"
         self.counts: dict = {}
         self._lock = threading.RLock()
+        self._save_lock = threading.Lock()  # snapshot + write as one, so an older snapshot never lands last
         self._dirty = False
         self._free: tuple[float, int | None] = (0.0, None)  # (checked at, bytes) for the library drive
         self.load()
@@ -113,19 +116,22 @@ class Automation:
             return
         self.review, self.skipped = d.get("review", {}), d.get("skipped", {})
         self.log, self.last_sweep = d.get("log", []), d.get("last_sweep", 0.0)
-        self.pending = d.get("pending", [])
+        self.pending, self.last_hook = d.get("pending", []), d.get("last_hook", {})
 
     def save(self, force: bool = False) -> None:
         if not (self._dirty or force):
             return
-        with self._lock:
-            data = {"review": self.review, "skipped": self.skipped, "log": self.log[-500:],
-                    "last_sweep": self.last_sweep, "pending": self.pending}
-        self.file.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data))
-        os.replace(tmp, self.file)
-        self._dirty = False
+        with self._save_lock:
+            with self._lock:
+                text = json.dumps({"review": self.review, "skipped": self.skipped, "log": self.log[-500:],
+                                   "last_sweep": self.last_sweep, "pending": self.pending,
+                                   "last_hook": self.last_hook})
+                self._dirty = False
+            try:
+                write_atomic(self.file, text)
+            except OSError:
+                self._dirty = True  # try again next time
+                raise
 
     def note(self, action: str, path: str = "", **kw) -> None:
         with self._lock:
@@ -326,10 +332,13 @@ class Automation:
                 self.queue.pop(0)
             return
         name, s = self.preset_for(nxt["path"])
+        fresh = eng.next_id
         j = eng.add_single(m, root, s, name, preview=False)
-        j.origin, j.auto_min_saving = "auto", (ASK_FIRST if mode == "ask" else cfg.auto_threshold)
         with self._lock:
             self.queue.pop(0)
+        if j.id < fresh:  # that file already has a job (one you started): leave it exactly as it is
+            return
+        j.origin, j.auto_min_saving = "auto", (ASK_FIRST if mode == "ask" else cfg.auto_threshold)
         self.note("encode", nxt["path"], preset=name, pct=nxt["pct"], measured=nxt["measured"], job=j.id)
         self.status = "working"
 
@@ -353,6 +362,12 @@ class Automation:
                     if st.st_size != p["size"]:
                         self.queue.pop(0)
                         continue
+                    if not p.get("hook") and time.time() - st.st_mtime < SETTLE:
+                        self.queue.pop(0)
+                        self.pending = [x for x in self.pending if x["path"] != p["path"]]
+                        self.pending.append({"path": p["path"], "due": st.st_mtime + SETTLE, "source": "sweep"})
+                        self._dirty = True
+                        continue
                     if st.st_nlink > 1:  # hardlinked into a torrent client: replacing it frees nothing yet
                         self.queue.pop(0)
                         self.skipped[p["path"]] = {"reason": "hardlinked (still seeding?) — replacing frees nothing",
@@ -374,7 +389,10 @@ class Automation:
         if not root or m.error:
             return None
         name, s = self.preset_for(path)
+        fresh = self.svc.engine.next_id
         j = self.svc.engine.add_single(m, root, s, name, preview=True)
+        if j.id < fresh:  # already has a job of its own
+            return j.id
         j.origin, j.auto_min_saving = "review", self.svc.cfg.review_threshold
         self.note("encode", path, preset=name, pct=p["pct"], reviewed=True, job=j.id)
         return j.id
@@ -403,6 +421,8 @@ class Automation:
     def webhook(self, source: str, payload: dict) -> str | None:
         """Sonarr/Radarr Connect → Webhook. Returns the local path we'll look at, or None."""
         event = payload.get("eventType", "")
+        self.last_hook[source] = time.time()
+        self._dirty = True
         if event == "Test":
             self.note("webhook-test", source=source)
             return None
@@ -417,7 +437,11 @@ class Automation:
             return None
         from .arr import ArrClient
         cfg = self.svc.cfg.sonarr if source == "sonarr" else self.svc.cfg.radarr
-        local = ArrClient(source.title(), cfg).to_local(remote) if cfg.path_map else remote
+        to_local = ArrClient(source.title(), cfg).to_local if cfg.path_map else (lambda x: x)
+        local = to_local(remote)
+        for gone in payload.get("deletedFiles") or []:  # an upgrade replaced these: our work on them is moot
+            if gone.get("path"):
+                self.drop_work(to_local(gone["path"]))
         if not self.svc.in_library(local):
             self.note("webhook-ignored", local, reason="not inside a library folder (check path mapping)",
                       source=source)
@@ -431,19 +455,36 @@ class Automation:
         self.note("webhook", local, source=source, event=event)
         return local
 
+    def drop_work(self, path: str) -> None:
+        """Sonarr/Radarr replaced or deleted this file: stop automation's job on it (yours are left alone)."""
+        eng = self.svc.engine
+        for j in list(eng.jobs.values()):
+            if norm(j.src) != norm(path) or j.origin not in ("auto", "review"):
+                continue
+            if j.stage in ACTIVE:
+                eng.cancel(j)
+            elif j.stage == "awaiting":  # not deny(): that's you saying no, and it'd be remembered as such
+                j.stage, j.finished, j.result = "discarded", time.time(), "Sonarr/Radarr replaced the original"
+                eng._cleanup(j)
+                eng.touch()
+            else:
+                continue
+            self.note("changed", j.src, why="Sonarr/Radarr replaced it — the encode was dropped", job=j.id)
+
     def process_pending(self) -> None:
         """Blocking (thread): look at newly imported files once Sonarr/Radarr are done with them."""
         now = time.time()
         with self._lock:
             due = [p for p in self.pending if p["due"] <= now]
             self.pending = [p for p in self.pending if p["due"] > now]
+        done, busy = self.svc.engine.done_sizes(), self.svc.engine.busy_paths()
         for item in due:
             path = item["path"]
-            if not os.path.exists(path):
+            if not os.path.exists(path) or norm(path) in busy:
                 continue
             m = self.svc.probes.get(path)
             root = self.svc.root_for(path)
-            if m.error or not root:
+            if m.error or not root or done.get(norm(path)) == m.size:  # missing, unreadable, or our own output
                 continue
             if self.excluded(path):
                 self.svc.scanner.add_info(root.path, m)
@@ -454,6 +495,7 @@ class Automation:
                 self.skipped.pop(path, None)
                 p = self.evaluate(m)
                 if p["verdict"] == "auto":
+                    p["hook"] = item["source"] != "sweep"  # Sonarr/Radarr finished importing it: no need to wait
                     self.queue = [q for q in self.queue if q["path"] != path]
                     self.queue.insert(0, p)  # new arrivals go first
                 elif p["verdict"] == "review":
@@ -498,6 +540,9 @@ class Automation:
         origin = getattr(obj, "origin", "")
         if origin not in ("auto", "review"):
             return
+        if kind in ("discarded", "failed"):  # don't redo it on its own until the file changes
+            why = "you discarded the encode" if kind == "discarded" else f"last try failed: {obj.error[:80]}"
+            self._remember_skip(obj.src, why, by_you=kind == "discarded")
         if kind == "auto_done" and obj.stage == "awaiting":
             self.note("needs-you", obj.src, why=obj.flag or obj.note, job=obj.id)
         elif kind == "replaced":
@@ -505,3 +550,18 @@ class Automation:
                       pct=1 - obj.out_size / max(1, obj.info.get("size", 1)), job=obj.id)
         elif kind == "failed":
             self.note("failed", obj.src, error=obj.error, job=obj.id)
+        elif kind == "discarded":
+            self.note("discarded", obj.src, job=obj.id)
+        elif kind == "source_changed":
+            self.note("changed", obj.src, why="Sonarr/Radarr changed it — the encode was dropped", job=obj.id)
+
+    def _remember_skip(self, path: str, reason: str, by_you: bool = False) -> None:
+        try:
+            st = os.stat(path)
+        except OSError:
+            return
+        with self._lock:
+            self.skipped[path] = {"reason": reason, "size": st.st_size, "mtime": st.st_mtime, "when": time.time(),
+                                  **({"by_you": True} if by_you else {})}
+            self.queue = [p for p in self.queue if p["path"] != path]
+            self._dirty = True
